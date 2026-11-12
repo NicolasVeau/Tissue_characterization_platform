@@ -1,15 +1,13 @@
 """CLI d'acquisition sans GUI : `python -m vna_app.cli {info,sweep}`."""
+
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
-
 from vna_app.driver.litevna import LiteVNA, LiteVNAError
+from vna_app.processing.export import write_s2p
 
 
 def cmd_info(args) -> int:
@@ -23,8 +21,6 @@ def cmd_info(args) -> int:
 
 
 def cmd_sweep(args) -> int:
-    import skrf
-
     out = Path(args.out)
     if out.suffix.lower() != ".s2p":
         print("erreur: --out doit se terminer par .s2p", file=sys.stderr)
@@ -35,30 +31,16 @@ def cmd_sweep(args) -> int:
         freqs, s_raw = vna.sweep()
         step = vna.step_hz
 
-    s = np.zeros((len(freqs), 2, 2), dtype=complex)
-    s[:, 0, 0] = s_raw[:, 0]  # S11
-    s[:, 1, 0] = s_raw[:, 1]  # S21
-    # S12 et S22 non mesurés (VNA 1 sens) : laissés à zéro.
-    net = skrf.Network(frequency=skrf.Frequency.from_f(freqs, unit="hz"), s=s,
-                       z0=50.0, name=out.stem)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    net.write_touchstone(filename=out.stem, dir=str(out.parent))
-
-    meta = {
-        "date": datetime.now(timezone.utc).isoformat(),
-        "start_hz": float(freqs[0]),
-        "stop_hz_requested": args.stop,
-        "stop_hz_actual": float(freqs[-1]),
-        "step_hz": step,
-        "points": args.points,
-        "averaging": args.avg,
-        "firmware": info["firmware"],
-        "hardware_revision": info["hardware_revision"],
-        "calibration_file": None,
-        "calibrated": False,
-        "note": "données brutes S11/S21 (rev/fwd), S12=S22=0",
-    }
-    out.with_suffix(".json").write_text(json.dumps(meta, indent=2))
+    write_s2p(
+        out,
+        freqs,
+        s_raw,
+        step_hz=step,
+        points=args.points,
+        averaging=args.avg,
+        info=info,
+        stop_hz_requested=args.stop,
+    )
     print(f"{len(freqs)} points écrits dans {out}")
     return 0
 
