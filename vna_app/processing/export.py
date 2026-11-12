@@ -20,7 +20,16 @@ def to_network(freqs, s_raw, name: str = "vna"):
 
 
 def write_s2p(
-    out, freqs, s_raw, *, step_hz, points, averaging, info, stop_hz_requested=None
+    out,
+    freqs,
+    s_raw,
+    *,
+    step_hz,
+    points,
+    averaging,
+    info,
+    stop_hz_requested=None,
+    calibration_file=None,
 ) -> Path:
     """Écrit out (.s2p) et out.json. Retourne le chemin du .s2p."""
     out = Path(out)
@@ -37,9 +46,10 @@ def write_s2p(
         "averaging": averaging,
         "firmware": info["firmware"],
         "hardware_revision": info["hardware_revision"],
-        "calibration_file": None,
-        "calibrated": False,
-        "note": "données brutes S11/S21 (rev/fwd), S12=S22=0",
+        "calibration_file": str(calibration_file) if calibration_file else None,
+        "calibrated": calibration_file is not None,
+        "note": ("S11/S21 calibrés" if calibration_file else "données brutes S11/S21 (rev/fwd)")
+        + ", S12=S22=0",
     }
     out.with_suffix(".json").write_text(json.dumps(meta, indent=2))
     return out
