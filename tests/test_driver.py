@@ -1,4 +1,5 @@
 """Tests du driver avec un faux port série émulant l'appareil (sans VNA)."""
+
 import struct
 
 import pytest
@@ -11,10 +12,15 @@ class FakeSerial:
     """Émule le sous-ensemble du protocole utilisé par LiteVNA."""
 
     def __init__(self, stale=0, drop_after=None, regs=None):
-        self.regs = {L.REG_DEVICE_VARIANT: 2, L.REG_PROTOCOL_VERSION: 1,
-                     L.REG_HW_REVISION: 2, L.REG_FW_MAJOR: 2, L.REG_FW_MINOR: 2}
+        self.regs = {
+            L.REG_DEVICE_VARIANT: 2,
+            L.REG_PROTOCOL_VERSION: 1,
+            L.REG_HW_REVISION: 2,
+            L.REG_FW_MAJOR: 2,
+            L.REG_FW_MINOR: 2,
+        }
         self.regs.update(regs or {})
-        self.stale = stale          # entrées résiduelles servies après le 1er restart
+        self.stale = stale  # entrées résiduelles servies après le 1er restart
         self.drop_after = drop_after  # lève SerialException après n lectures
         self.rx = bytearray()
         self.fifo = []
@@ -40,7 +46,7 @@ class FakeSerial:
             self.rx += int(self.regs[d[1]]).to_bytes(2, "little")
         elif d[:1] in (bytes([L.OP_WRITE2]), bytes([L.OP_WRITE])):
             size = 2 if d[0] == L.OP_WRITE2 else 1
-            val = int.from_bytes(d[2:2 + size], "little")
+            val = int.from_bytes(d[2 : 2 + size], "little")
             self.regs[d[1]] = val
             if d[1] == L.REG_SWEEP_POINTS:
                 self.points = val

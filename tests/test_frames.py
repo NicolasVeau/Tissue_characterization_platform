@@ -28,9 +28,9 @@ def test_decode_single():
 
 
 def test_decode_extreme_values_and_u16_index():
-    raw = struct.pack(FRAME_FMT, 2**31 - 1, -2**31, 0, 0, 0, 0, 65534)
+    raw = struct.pack(FRAME_FMT, 2**31 - 1, -(2**31), 0, 0, 0, 0, 65534)
     fr = decode_frame(raw)
-    assert fr.fwd0 == complex(2**31 - 1, -2**31)
+    assert fr.fwd0 == complex(2**31 - 1, -(2**31))
     assert fr.freq_index == 65534
 
 
@@ -64,8 +64,7 @@ def test_averaging_interleaved_and_shuffled():
     for k in range(n):
         for a in range(avg):
             # rev0Re moyenne = 100*(k+1) ; bruit symétrique (-a+1..)
-            raws.append(struct.pack(FRAME_FMT, 1000, 0, 100 * (k + 1) + (a - 1) * 10, 0,
-                                    0, 0, k))
+            raws.append(struct.pack(FRAME_FMT, 1000, 0, 100 * (k + 1) + (a - 1) * 10, 0, 0, 0, k))
     random.Random(7).shuffle(raws)
     s = assemble_sweep(decode_frames(b"".join(raws)), n, avg)
     np.testing.assert_allclose(s[:, 0], 0.1 * (np.arange(n) + 1))
@@ -73,8 +72,10 @@ def test_averaging_interleaved_and_shuffled():
 
 def test_averaging_raw_complex_before_division():
     # fwd varie : <rev>/<fwd> = 200/1500, différent de moyenne(rev/fwd)
-    raws = [struct.pack(FRAME_FMT, 1000, 0, 100, 0, 0, 0, 0),
-            struct.pack(FRAME_FMT, 2000, 0, 300, 0, 0, 0, 0)]
+    raws = [
+        struct.pack(FRAME_FMT, 1000, 0, 100, 0, 0, 0, 0),
+        struct.pack(FRAME_FMT, 2000, 0, 300, 0, 0, 0, 0),
+    ]
     s = assemble_sweep(decode_frames(b"".join(raws)), 1, 2)
     assert s[0, 0] == pytest.approx(200 / 1500)
 
@@ -92,7 +93,8 @@ def test_out_of_range_index_ignored_then_incomplete():
 
 
 def test_extra_duplicates_ignored():
-    raws = b"".join(struct.pack(FRAME_FMT, 100, 0, v, 0, 0, 0, k)
-                    for k, v in ((0, 10), (0, 99999), (1, 20)))
+    raws = b"".join(
+        struct.pack(FRAME_FMT, 100, 0, v, 0, 0, 0, k) for k, v in ((0, 10), (0, 99999), (1, 20))
+    )
     s = assemble_sweep(decode_frames(raws), 2, 1)
     np.testing.assert_allclose(s[:, 0], [0.1, 0.2])

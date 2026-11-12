@@ -3,6 +3,7 @@
 Référence : docs/protocol.md. Les données renvoyées sont BRUTES (non calibrées).
 Ce module est synchrone ; l'appelant GUI doit l'exécuter hors du thread Qt.
 """
+
 from __future__ import annotations
 
 import struct
@@ -82,7 +83,7 @@ def decode_frames(buf: bytes) -> List[Frame]:
     """Décode un buffer contenant un nombre entier d'entrées de 32 octets."""
     if len(buf) % FRAME_SIZE:
         raise ValueError("taille de buffer non multiple de 32")
-    return [decode_frame(buf[i:i + FRAME_SIZE]) for i in range(0, len(buf), FRAME_SIZE)]
+    return [decode_frame(buf[i : i + FRAME_SIZE]) for i in range(0, len(buf), FRAME_SIZE)]
 
 
 def assemble_sweep(frames: Iterable[Frame], points: int, averaging: int) -> np.ndarray:
@@ -225,9 +226,7 @@ class LiteVNA:
         self.fw_major = self.read_reg(REG_FW_MAJOR)
         self.fw_minor = self.read_reg(REG_FW_MINOR)
         if self.variant != VARIANT_SAA2:
-            raise LiteVNAError(
-                f"deviceVariant=0x{self.variant:02x}, attendu 0x02 (SAA2/LiteVNA)"
-            )
+            raise LiteVNAError(f"deviceVariant=0x{self.variant:02x}, attendu 0x02 (SAA2/LiteVNA)")
 
     def device_info(self) -> dict:
         self._port()
@@ -239,8 +238,9 @@ class LiteVNA:
         }
 
     # -- sweep -----------------------------------------------------------------
-    def configure_sweep(self, start_hz: float, stop_hz: float, points: int,
-                        averaging: int = 1) -> np.ndarray:
+    def configure_sweep(
+        self, start_hz: float, stop_hz: float, points: int, averaging: int = 1
+    ) -> np.ndarray:
         """Configure le sweep, relit les registres pour vérifier, retourne les fréquences."""
         if not 1 <= points <= MAX_POINTS:
             raise ValueError(f"points doit être dans 1..{MAX_POINTS}")
