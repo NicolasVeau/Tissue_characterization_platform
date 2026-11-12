@@ -66,7 +66,7 @@ Avant de proposer une modification comme terminée :
 
 ## Commandes utiles
 - Activer l'env : `source ~/venvs/vna/bin/activate`
-- Identifier le VNA : `ls -l /dev/litevna`, `lsusb | grep -i 0483`
+- Identifier le VNA : `ls -l /dev/litevna`, `lsusb | grep -i 04b4:0008` (ZeenKo.tech « LiteVNA6 »)
 - Test de vie : `python -c "import serial;s=serial.Serial('/dev/litevna',timeout=1);s.write(b'\x0d');print(s.read(1))"` → doit afficher `b'2'` (0x32)
 
 ## Hors périmètre pour l'instant
