@@ -116,3 +116,59 @@ def test_cal_grid_mismatch_exit_1(fake, tmp_path, monkeypatch, capsys):
     assert rc == 1
     assert "grille" in capsys.readouterr().err
     assert not out.exists()
+
+
+def test_eps_cli_three_reference(fake, tmp_path):
+    """Sonde : Y = jωC0 ε*. Le faux VNA renvoie Γ(ε) à travers la boîte d'erreur."""
+    from vna_app.processing.permittivity import water_25c
+
+    w = 2 * np.pi * F
+    c0 = 0.1e-12
+
+    def gamma_of(eps):
+        y = 1j * w * c0 * eps
+        return E00 + E0110 * ((1 - 50 * y) / (1 + 50 * y)) / (
+            1 - E11 * ((1 - 50 * y) / (1 + 50 * y))
+        )
+
+    eps_true = 12.0 - 3.0j
+    cases = {
+        "air": gamma_of(np.ones(len(F))),
+        "short": E00 + E0110 * (-1) / (1 + E11),
+        "ref": gamma_of(water_25c(F)),
+        "dut": gamma_of(np.full(len(F), eps_true)),
+    }
+    for name, g in cases.items():
+        s = np.zeros((len(F), 2, 2), complex)
+        s[:, 0, 0] = g
+        skrf.Network(frequency=skrf.Frequency.from_f(F, unit="hz"), s=s, z0=50).write_touchstone(
+            filename=name, dir=str(tmp_path)
+        )
+    out = tmp_path / "eps.csv"
+    rc = cli.main(
+        [
+            "eps",
+            "--sample",
+            str(tmp_path / "dut.s2p"),
+            "--air",
+            str(tmp_path / "air.s2p"),
+            "--short",
+            str(tmp_path / "short.s2p"),
+            "--ref",
+            str(tmp_path / "ref.s2p"),
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    d = np.loadtxt(out, delimiter=",", skiprows=1)
+    np.testing.assert_allclose(d[:, 1], 12.0, rtol=1e-5)
+    np.testing.assert_allclose(d[:, 2], 3.0, rtol=1e-4)
+
+
+def test_eps_cli_missing_refs(fake, tmp_path, capsys):
+    STATE["gamma"] = 0.0
+    sweep(tmp_path, "dut.s2p")
+    rc = cli.main(["eps", "--sample", str(tmp_path / "dut.s2p"), "--out", str(tmp_path / "e.csv")])
+    assert rc == 1
+    assert "--air" in capsys.readouterr().err

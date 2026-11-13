@@ -1,4 +1,4 @@
-"""CLI d'acquisition sans GUI : `python -m vna_app.cli {info,sweep,calibrate}`."""
+"""CLI d'acquisition sans GUI : `python -m vna_app.cli {info,sweep,calibrate,eps}`."""
 
 from __future__ import annotations
 
@@ -9,6 +9,13 @@ from pathlib import Path
 from vna_app.calibration import Calibration, CalibrationError
 from vna_app.driver.litevna import LiteVNA, LiteVNAError
 from vna_app.processing.export import write_s2p
+from vna_app.processing.filters import smooth_complex
+from vna_app.processing.permittivity import (
+    REFERENCE_LIQUIDS,
+    eps_capacitive,
+    eps_three_reference,
+    to_eps_columns,
+)
 
 
 def cmd_info(args) -> int:
@@ -80,6 +87,49 @@ def cmd_calibrate(args) -> int:
     return 0
 
 
+def _same_grid(name, f, ref):
+    if f.shape != ref.shape or abs(f - ref).max() > 1.0:
+        raise CalibrationError(f"{name}: grille de fréquences différente de --sample")
+
+
+def cmd_eps(args) -> int:
+    """ε* d'une sonde coaxiale ouverte à partir de S11 de fichiers .s2p."""
+    import numpy as np
+
+    f, gx, _ = _load_s(args.sample)
+    if args.c0 is not None:
+        meta = Path(args.sample).with_suffix(".json")
+        if meta.exists() and '"calibrated": false' in meta.read_text():
+            print("attention: --c0 suppose un S11 calibré, ce sweep est brut", file=sys.stderr)
+        eps = eps_capacitive(f, gx, args.c0)
+        method = f"capacitif C0={args.c0:g} F"
+    else:
+        if not (args.air and args.short and args.ref):
+            raise CalibrationError("sans --c0, fournir --air, --short et --ref")
+        gs = []
+        for name, path in (("air", args.air), ("short", args.short), ("ref", args.ref)):
+            fx, g, _ = _load_s(path)
+            _same_grid(name, fx, f)
+            gs.append(g)
+        eps_ref = REFERENCE_LIQUIDS[args.ref_liquid](f)
+        eps = eps_three_reference(gx, gs[0], gs[1], gs[2], eps_ref)
+        method = f"3 références (air, court-circuit, {args.ref_liquid})"
+    if args.smooth > 1:
+        eps = smooth_complex(eps, args.smooth)
+    e1, e2, tan = to_eps_columns(eps)
+    data = np.column_stack([f, e1, e2, tan])
+    np.savetxt(
+        args.out,
+        data,
+        delimiter=",",
+        header="f_Hz,eps_real,eps_loss,tan_delta",
+        comments="",
+        fmt="%.9g",
+    )
+    print(f"{len(f)} points écrits dans {args.out} — méthode : {method}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="vna_app.cli")
     p.add_argument("--port", default="/dev/litevna")
@@ -97,9 +147,20 @@ def main(argv=None) -> int:
         cp.add_argument(f"--{k}", required=True, help=f"sweep brut .s2p du standard {k}")
     cp.add_argument("--thru", help="sweep brut .s2p du Thru (normalisation S21)")
     cp.add_argument("--out", required=True, help="fichier .cal")
+    ep = sub.add_parser("eps", help="ε* (sonde coaxiale ouverte) -> CSV")
+    ep.add_argument("--sample", required=True, help=".s2p de l'échantillon (S11)")
+    ep.add_argument("--air", help=".s2p sonde dans l'air (ε=1)")
+    ep.add_argument("--short", help=".s2p sonde court-circuitée")
+    ep.add_argument("--ref", help=".s2p sonde dans le liquide de référence")
+    ep.add_argument("--ref-liquid", default="water", choices=sorted(REFERENCE_LIQUIDS))
+    ep.add_argument("--c0", type=float, help="capacité de frange (F) : méthode capacitive")
+    ep.add_argument("--smooth", type=int, default=1, help="fenêtre Savitzky-Golay (impair)")
+    ep.add_argument("--out", required=True, help="fichier .csv")
     args = p.parse_args(argv)
     try:
-        return {"info": cmd_info, "sweep": cmd_sweep, "calibrate": cmd_calibrate}[args.cmd](args)
+        return {"info": cmd_info, "sweep": cmd_sweep, "calibrate": cmd_calibrate, "eps": cmd_eps}[
+            args.cmd
+        ](args)
     except (LiteVNAError, CalibrationError) as e:
         print(f"erreur: {e}", file=sys.stderr)
         return 1
