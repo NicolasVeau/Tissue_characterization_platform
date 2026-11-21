@@ -119,3 +119,10 @@ def test_eps_three_ref_without_refs_reports(win):
     feed(win, one(0.3))
     assert "référence manquante" in win.status.text()
     assert win.ceps1.getData()[0] is None or len(win.ceps1.getData()[0]) == 0
+
+
+def test_smith_follows_s11(win):
+    feed(win, one(0.2))
+    x, y = win.smith.trace.getData()
+    assert len(x) == len(F)
+    np.testing.assert_allclose(x + 1j * y, win.result.s[:, 0])

@@ -45,6 +45,7 @@ class Pipeline:
         self.c0 = 0.08e-12
         self.ref_liquid = "water"
         self.smooth = 1
+        self.delay_s = 0.0  # câble plan de cal -> capteur (simple trajet, s)
 
     # -- standards -------------------------------------------------------------
     def capture(self, name, freqs, s_raw):
@@ -72,6 +73,7 @@ class Pipeline:
             self.standards["load"][1][:, 0],
             thru_s21=thru,
         )
+        self.cal.delay_s = self.delay_s
         self.cal_path = None
         self.apply_cal = True
         return self.cal
@@ -79,11 +81,13 @@ class Pipeline:
     def save_cal(self, path):
         if self.cal is None:
             raise CalibrationError("aucune calibration à enregistrer")
+        self.cal.delay_s = self.delay_s
         self.cal.save(path)
         self.cal_path = str(path)
 
     def load_cal(self, path):
         self.cal = Calibration.load(path)
+        self.delay_s = self.cal.delay_s
         self.cal_path = str(path)
         self.apply_cal = True
         return self.cal
@@ -96,7 +100,7 @@ class Pipeline:
         s, calibrated = s_raw, False
         if self.apply_cal and self.cal is not None:
             try:
-                s, calibrated = self.cal.apply(freqs, s_raw), True
+                s, calibrated = self.cal.apply(freqs, s_raw, delay_s=self.delay_s), True
             except CalibrationError as e:
                 notes.append(f"calibration non appliquée : {e}")
         eps = None

@@ -41,7 +41,8 @@ def cmd_sweep(args) -> int:
         step = vna.step_hz
 
     if cal is not None:
-        s_raw = cal.apply(freqs, s_raw)  # CalibrationError si grille différente
+        delay = None if args.delay_ns is None else args.delay_ns * 1e-9
+        s_raw = cal.apply(freqs, s_raw, delay_s=delay)  # CalibrationError si grille différente
 
     write_s2p(
         out,
@@ -82,6 +83,7 @@ def cmd_calibrate(args) -> int:
         if ft.shape != f.shape or abs(ft - f).max() > 1.0:
             raise CalibrationError("thru: grille de fréquences différente de --open")
     cal = Calibration.from_measurements(f, o, s, ld, thru_s21=thru)
+    cal.delay_s = args.delay_ns * 1e-9
     cal.save(args.out)
     print(f"calibration écrite dans {args.out} ({len(f)} pts, {cal.meta['type']})")
     return 0
@@ -142,10 +144,16 @@ def main(argv=None) -> int:
     sw.add_argument("--avg", type=int, default=1)
     sw.add_argument("--out", required=True)
     sw.add_argument("--cal", help="fichier .cal à appliquer (même grille de fréquences)")
+    sw.add_argument(
+        "--delay-ns", type=float, help="délai simple trajet du câble (ns), prioritaire sur le .cal"
+    )
     cp = sub.add_parser("calibrate", help="sweeps bruts O/S/L(/Thru) -> .cal")
     for k in ("open", "short", "load"):
         cp.add_argument(f"--{k}", required=True, help=f"sweep brut .s2p du standard {k}")
     cp.add_argument("--thru", help="sweep brut .s2p du Thru (normalisation S21)")
+    cp.add_argument(
+        "--delay-ns", type=float, default=0.0, help="délai simple trajet câble->capteur (ns)"
+    )
     cp.add_argument("--out", required=True, help="fichier .cal")
     ep = sub.add_parser("eps", help="ε* (sonde coaxiale ouverte) -> CSV")
     ep.add_argument("--sample", required=True, help=".s2p de l'échantillon (S11)")

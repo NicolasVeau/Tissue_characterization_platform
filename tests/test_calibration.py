@@ -139,3 +139,25 @@ def test_kit_is_pluggable():
     assert cal.meta["kit"] == "kit2"
     out = cal.apply(f, np.stack([o, np.zeros(len(f), complex)], 1))[:, 0]
     np.testing.assert_allclose(out, g_open, atol=1e-10)
+
+
+def test_cable_delay_deembeds_s11_phase():
+    o, s, ld = std()
+    cal = Calibration.from_measurements(F, o, s, ld)
+    tau = 1.5e-9
+    gamma = 0.3 * np.exp(1j * np.linspace(0, 6, len(F)))
+    # le capteur est au bout du câble : le plan de cal voit Γ·exp(-j2ωτ)
+    seen = gamma * np.exp(-2j * np.pi * F * 2 * tau)
+    raw = np.stack([measure(seen), np.ones(len(F), complex)], axis=1)
+    np.testing.assert_allclose(cal.apply(F, raw, delay_s=tau)[:, 0], gamma, atol=1e-10)
+    cal.delay_s = tau
+    np.testing.assert_allclose(cal.apply(F, raw)[:, 0], gamma, atol=1e-10)
+    np.testing.assert_allclose(cal.apply(F, raw, delay_s=0.0)[:, 0], seen, atol=1e-10)
+
+
+def test_delay_saved_in_cal_file(tmp_path):
+    o, s, ld = std()
+    cal = Calibration.from_measurements(F, o, s, ld)
+    cal.delay_s = 2.5e-9
+    cal.save(tmp_path / "x.cal")
+    assert Calibration.load(tmp_path / "x.cal").delay_s == 2.5e-9

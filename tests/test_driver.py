@@ -69,13 +69,15 @@ class FakeSerial:
         return out
 
     # -- émulation
-    def _entry(self, k):
-        return struct.pack(L.FRAME_FMT, 1000, 0, 10 * (k + 1), 0, k, 0, k)
+    def _entry(self, k, stale=False):
+        rev0 = -777 if stale else 10 * (k + 1)  # un résiduel porte une valeur ANCIENNE (fausse)
+        return struct.pack(L.FRAME_FMT, 1000, 0, rev0, 0, k, 0, k)
 
     def _restart(self):
         self.fifo = [self._entry(k) for k in range(self.points) for _ in range(self.avg or 1)]
         if self.first_restart and self.stale:
-            self.fifo = [self._entry(k) for k in range(self.stale)] + self.fifo
+            old = [self._entry(k, True) for k in range(self.stale) for _ in range(self.avg or 1)]
+            self.fifo = old + self.fifo
         if self.points and self.avg:
             self.first_restart = False
 
@@ -115,13 +117,36 @@ def test_sweep_averaging(monkeypatch):
     assert s.shape == (11, 2)
 
 
-def test_stale_entries_trigger_retry(monkeypatch):
-    # 63 résiduelles de l'ancien sweep : 1re tentative incomplète, 2e OK
-    vna, fake = make(monkeypatch, stale=63)
-    vna.configure_sweep(400e6, 3e9, 201, 1)
+@pytest.mark.parametrize("stale", [1, 14, 63, 200])
+@pytest.mark.parametrize("avg", [1, 3])
+def test_stale_entries_discarded(monkeypatch, stale, avg):
+    """Résiduels (ancien échantillon) jetés : seul le nouveau balayage est utilisé."""
+    vna, fake = make(monkeypatch, stale=stale)
+    vna.configure_sweep(400e6, 3e9, 201, avg)
     fake.first_restart = True  # le résiduel arrive au restart de sweep()
-    _, s = vna.sweep()
+    _, s = vna.sweep(retries=0)
     assert s.shape == (201, 2)
+    assert (s[:, 0].real > 0).all()  # aucun résiduel (-777) conservé
+    for k in (0, 1, stale - 1, 5, 200):
+        if 0 <= k < 201:
+            assert s[k, 0] == pytest.approx(0.01 * (k + 1))
+
+
+def test_endless_bad_indices_hit_cap_then_error(monkeypatch):
+    vna, fake = make(monkeypatch)
+    vna.configure_sweep(400e6, 3e9, 11, 1)
+    orig = fake.write
+
+    def write(data):
+        d = bytes(data)
+        if d[:1] == bytes([L.OP_READFIFO]):  # appareil qui ne renvoie que l'index 0, sans fin
+            fake.rx += b"".join(fake._entry(0) for _ in range(d[2]))
+        else:
+            orig(data)
+
+    fake.write = write
+    with pytest.raises(L.LiteVNAError, match="incomplet"):
+        vna.sweep(retries=1)
 
 
 def test_refused_params(monkeypatch):
@@ -159,3 +184,101 @@ def test_timeout_when_no_data(monkeypatch):
 def test_not_connected():
     with pytest.raises(L.LiteVNAError):
         L.LiteVNA("/dev/fake").device_info()
+
+
+# -- streaming ----------------------------------------------------------------
+def _get(q, timeout=5):
+    import queue as _q
+
+    try:
+        return q.get(timeout=timeout)
+    except _q.Empty:  # pragma: no cover
+        pytest.fail("rien reçu dans la queue")
+
+
+def test_streaming_delivers_ordered_results(monkeypatch):
+    vna, _ = make(monkeypatch)
+    vna.configure_sweep(400e6, 3e9, 21, 1)
+    q = vna.start_streaming(maxsize=16)
+    assert vna.is_streaming
+    got = [_get(q) for _ in range(5)]
+    vna.stop_streaming()
+    assert not vna.is_streaming
+    assert [r.seq for r in got] == [0, 1, 2, 3, 4]
+    assert all(isinstance(r, L.SweepResult) and r.s_raw.shape == (21, 2) for r in got)
+    assert got[0].freqs[0] == 400e6 and got[0].timestamp > 0
+
+
+def test_streaming_slow_consumer_never_blocks_and_keeps_latest(monkeypatch):
+    import threading as _th
+
+    vna, _ = make(monkeypatch)
+    vna.configure_sweep(400e6, 3e9, 11, 1)
+    q = vna.start_streaming(maxsize=2)
+    _th.Event().wait(0.3)  # time.sleep est neutralisé par make() ; le consommateur dort
+    vna.stop_streaming()
+    items = []
+    while not q.empty():
+        items.append(q.get_nowait())
+    assert 1 <= len(items) <= 2
+    assert items[-1].seq >= 2  # les plus anciens ont été écartés
+
+
+def test_streaming_disconnect_puts_error_and_stops(monkeypatch):
+    vna, fake = make(monkeypatch)
+    vna.configure_sweep(400e6, 3e9, 21, 1)
+    q = vna.start_streaming(maxsize=64)
+    assert isinstance(_get(q), L.SweepResult)
+    fake.drop_after = fake.reads  # coupe la liaison
+    err = None
+    for _ in range(200):
+        item = _get(q)
+        if isinstance(item, Exception):
+            err = item
+            break
+    assert isinstance(err, L.LiteVNAError)
+    vna._thread.join(5)
+    assert not vna.is_streaming
+
+
+def test_sync_calls_refused_while_streaming(monkeypatch):
+    vna, _ = make(monkeypatch)
+    vna.configure_sweep(400e6, 3e9, 21, 1)
+    vna.start_streaming()
+    with pytest.raises(L.LiteVNAError, match="streaming"):
+        vna.sweep()
+    with pytest.raises(L.LiteVNAError, match="streaming"):
+        vna.configure_sweep(1e9, 2e9, 11, 1)
+    with pytest.raises(L.LiteVNAError, match="déjà"):
+        vna.start_streaming()
+    vna.stop_streaming()
+    vna.stop_streaming()  # idempotent
+    vna.configure_sweep(1e9, 2e9, 11, 1)  # de nouveau autorisé
+    assert vna.sweep()[1].shape == (11, 2)
+
+
+def test_streaming_requires_configure(monkeypatch):
+    vna, _ = make(monkeypatch)
+    with pytest.raises(L.LiteVNAError, match="configure_sweep"):
+        vna.start_streaming()
+
+
+def test_close_stops_streaming(monkeypatch):
+    vna, fake = make(monkeypatch)
+    vna.configure_sweep(400e6, 3e9, 21, 1)
+    vna.start_streaming()
+    vna.close()
+    assert not vna.is_streaming and fake.closed
+
+
+def test_restart_streaming_after_reconfigure(monkeypatch):
+    vna, _ = make(monkeypatch)
+    vna.configure_sweep(400e6, 3e9, 21, 1)
+    q = vna.start_streaming()
+    _get(q)
+    vna.stop_streaming()
+    vna.configure_sweep(1e9, 2e9, 11, 1)
+    q2 = vna.start_streaming()
+    r = _get(q2)
+    vna.stop_streaming()
+    assert r.seq == 0 and r.s_raw.shape == (11, 2)

@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
 )
 
 from vna_app.calibration import CalibrationError
+from vna_app.gui.smith import SmithChart
 from vna_app.gui.worker import Worker
 from vna_app.processing.export import write_s2p
 from vna_app.processing.permittivity import REFERENCE_LIQUIDS, to_eps_columns
@@ -45,7 +46,7 @@ class MainWindow(QMainWindow):
     def __init__(self, port: str = "/dev/litevna"):
         super().__init__()
         self.setWindowTitle("vna_app — LiteVNA 64")
-        self.resize(1250, 800)
+        self.resize(1500, 800)
         self.info = None
         self.last = None  # (freqs, s_raw, params)
         self.result = None  # processing.pipeline.Result
@@ -88,9 +89,11 @@ class MainWindow(QMainWindow):
         for p in (self.plot11, self.plot21, self.plot_eps):
             plots.addWidget(p)
 
+        self.smith = SmithChart()
         root = QHBoxLayout()
         root.addWidget(side_w)
-        root.addLayout(plots, 1)
+        root.addLayout(plots, 3)
+        root.addWidget(self.smith, 2)
         c = QWidget()
         c.setLayout(root)
         self.setCentralWidget(c)
@@ -168,6 +171,21 @@ class MainWindow(QMainWindow):
         self.chk_cal = QCheckBox("Appliquer la calibration")
         self.cal_info = QLabel("Aucune calibration")
         self.cal_info.setWordWrap(True)
+        self.delay_ns = QDoubleSpinBox()
+        self.delay_ns.setRange(0.0, 100.0)
+        self.delay_ns.setDecimals(3)
+        self.delay_ns.setSingleStep(0.1)
+        self.delay_ns.setSuffix(" ns")
+        self.delay_ns.setToolTip(
+            "Délai simple trajet du câble coaxial entre le plan de calibration et le capteur "
+            "(≈ 5 ns/m pour un câble PE, VF 0,66). Appliqué à S11, aller-retour."
+        )
+        self.delay_ns.valueChanged.connect(self.on_delay)
+        self.delay_len = QLabel("")
+        dform = QFormLayout()
+        dform.addRow("Délai câble (simple trajet)", self.delay_ns)
+        dform.addRow("≈ longueur (VF 0,66)", self.delay_len)
+        self.on_delay(0.0)
         self.btn_build.clicked.connect(self.build_cal)
         self.btn_load_cal.clicked.connect(self.load_cal)
         self.chk_cal.toggled.connect(self.on_apply_cal)
@@ -179,6 +197,7 @@ class MainWindow(QMainWindow):
             self.cal_info,
         ):
             lay.addWidget(w)
+        lay.addLayout(dform)
         lay.addStretch(1)
         w = QWidget()
         w.setLayout(lay)
@@ -317,6 +336,8 @@ class MainWindow(QMainWindow):
         self.plot21.setTitle(f"|S21| ({tag})")
         self.c11.setData(freqs, _db(r.s[:, 0]))
         self.c21.setData(freqs, _db(r.s[:, 1]))
+        self.smith.setTitle(f"Smith — S11 ({tag})")
+        self.smith.set_gamma(r.s[:, 0])
         show_eps = r.eps is not None
         self.plot_eps.setVisible(self.pipeline.eps_mode != "off")
         if show_eps:
@@ -370,6 +391,7 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Calibration : {e}")
             QMessageBox.warning(self, "Calibration", str(e))
             return
+        self._sync_delay()
         self.cal_info.setText(
             f"{path} — {len(cal.freqs)} pts, {cal.freqs[0] / 1e6:.0f}–{cal.freqs[-1] / 1e6:.0f} MHz"
         )
@@ -381,6 +403,18 @@ class MainWindow(QMainWindow):
         self.chk_cal.setChecked(on)
         self.chk_cal.blockSignals(False)
         self.pipeline.apply_cal = on
+
+    def on_delay(self, ns):
+        self.pipeline.delay_s = ns * 1e-9
+        self.delay_len.setText(f"{ns * 1e-9 * 299792458 * 0.66:.3f} m")
+        if self.pipeline.cal is not None:
+            self.redisplay()
+
+    def _sync_delay(self):
+        self.delay_ns.blockSignals(True)
+        self.delay_ns.setValue(self.pipeline.delay_s * 1e9)
+        self.delay_ns.blockSignals(False)
+        self.delay_len.setText(f"{self.pipeline.delay_s * 299792458 * 0.66:.3f} m")
 
     def on_apply_cal(self, on):
         self.pipeline.apply_cal = on

@@ -6,10 +6,12 @@ Ce module est synchrone ; l'appelant GUI doit l'exécuter hors du thread Qt.
 
 from __future__ import annotations
 
+import queue
 import struct
+import threading
 import time
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import serial
@@ -116,8 +118,30 @@ def assemble_sweep(frames: Iterable[Frame], points: int, averaging: int) -> np.n
     return s
 
 
+class SweepResult(NamedTuple):
+    """Un sweep complet livré par l'API de streaming."""
+
+    seq: int  # numéro d'ordre depuis start_streaming()
+    timestamp: float  # time.time() à la fin du sweep
+    freqs: np.ndarray  # (N,) Hz
+    s_raw: np.ndarray  # (N,2) complexe [S11, S21] bruts
+
+
+def _put_latest(q: "queue.Queue", item) -> None:
+    """Met `item` dans q sans jamais bloquer : si pleine, écarte le plus ancien."""
+    while True:
+        try:
+            q.put_nowait(item)
+            return
+        except queue.Full:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+
+
 class LiteVNA:
-    """Accès synchrone au LiteVNA 64."""
+    """Accès au LiteVNA 64 : API synchrone (sweep) et API de streaming (thread + queue)."""
 
     def __init__(self, port: str = "/dev/litevna", timeout: float = 1.0):
         self.port = port
@@ -132,6 +156,8 @@ class LiteVNA:
         self.step_hz = 0
         self.points = 0
         self.averaging = 1
+        self._thread: Optional[threading.Thread] = None
+        self._stop_evt = threading.Event()
 
     # -- connexion -------------------------------------------------------------
     def connect(self) -> None:
@@ -150,6 +176,7 @@ class LiteVNA:
             raise
 
     def close(self) -> None:
+        self.stop_streaming()
         if self._ser is not None:
             try:
                 self._ser.close()
@@ -242,6 +269,7 @@ class LiteVNA:
         self, start_hz: float, stop_hz: float, points: int, averaging: int = 1
     ) -> np.ndarray:
         """Configure le sweep, relit les registres pour vérifier, retourne les fréquences."""
+        self._check_not_streaming()
         if not 1 <= points <= MAX_POINTS:
             raise ValueError(f"points doit être dans 1..{MAX_POINTS}")
         if not 1 <= averaging <= 0xFFFF:
@@ -273,11 +301,10 @@ class LiteVNA:
     def sweep(self, retries: int = 2) -> Tuple[np.ndarray, np.ndarray]:
         """Lance un sweep avec la config courante. Retourne (freqs, s_raw (N,2) [S11,S21]).
 
-        Constaté sur matériel (fw 2.2) : le premier sweep après configure_sweep() peut
-        renvoyer des entrées résiduelles de l'ancien sweep (index 0..k) avant le
-        nouveau, ce qui laisse des points incomplets. Dans ce cas on relance le sweep
-        (la réécriture d'un registre vide le FIFO), jusqu'à `retries` fois.
+        `retries` : relances (redémarrage du sweep, qui vide le FIFO) si des points restent
+        incomplets après lecture, voir `_acquire_once`.
         """
+        self._check_not_streaming()
         if self.points < 1:
             raise LiteVNAError("configure_sweep() doit être appelé avant sweep()")
         last: Optional[LiteVNAError] = None
@@ -289,13 +316,105 @@ class LiteVNA:
         raise LiteVNAError(f"sweep incomplet après {retries + 1} tentatives: {last}")
 
     def _acquire_once(self) -> np.ndarray:
-        n_total = self.points * self.averaging
+        """Un sweep : lit jusqu'à ce que chaque point ait `averaging` entrées.
+
+        Après le redémarrage du sweep, l'appareil peut livrer d'abord des entrées
+        RÉSIDUELLES : le début de l'ancien balayage (index 0..k, mesuré jusqu'à ~63
+        entrées), puis le nouveau balayage depuis l'index 0. Ces résiduelles ont été
+        mesurées AVANT le redémarrage : si l'échantillon a changé entre-temps (standard
+        de calibration, sonde, ...) elles sont fausses. Un balayage repart toujours de
+        l'index 0 : quand l'index 0 réapparaît alors que le point 0 est déjà complet,
+        tout ce qui a été lu avant est jeté et on repart de zéro (le sweep complet
+        qui suit est le bon). Plafond de 3×N×avg entrées lues au total.
+        """
+        points, avg = self.points, self.averaging
+        n_total = points * avg
         # Réécrire un registre de sweep vide le FIFO et relance un sweep propre.
-        self.write_reg(REG_SWEEP_POINTS, self.points, 2)
-        deadline = time.monotonic() + n_total / 500.0 + 2.0
+        self.write_reg(REG_SWEEP_POINTS, points, 2)
+        deadline = time.monotonic() + n_total / 200.0 + 3.0
+        cap = 3 * n_total
+        counts = np.zeros(points, dtype=np.int64)
+        missing = n_total
         frames: List[Frame] = []
-        while len(frames) < n_total:
-            n = min(MAX_FIFO_READ, n_total - len(frames))
+        total = 0
+        while missing > 0:
+            if total >= cap:
+                raise LiteVNAIncomplete(f"{missing} entrée(s) manquante(s) après {total} lues")
+            n = min(MAX_FIFO_READ, missing, cap - total)
             self._write(bytes([OP_READFIFO, REG_FIFO, n]))
-            frames.extend(decode_frames(self._read_exact(n * FRAME_SIZE, deadline)))
-        return assemble_sweep(frames, self.points, self.averaging)
+            for fr in decode_frames(self._read_exact(n * FRAME_SIZE, deadline)):
+                total += 1
+                k = fr.freq_index
+                if k >= points:
+                    continue
+                if k == 0 and counts[0] >= avg:  # nouveau balayage : jeter le résiduel
+                    frames.clear()
+                    counts[:] = 0
+                    missing = n_total
+                frames.append(fr)
+                if counts[k] < avg:
+                    counts[k] += 1
+                    missing -= 1
+        return assemble_sweep(frames, points, avg)
+
+    # -- streaming asynchrone --------------------------------------------------
+    @property
+    def is_streaming(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _check_not_streaming(self) -> None:
+        t = self._thread
+        if t is not None and t.is_alive() and threading.current_thread() is not t:
+            raise LiteVNAError("streaming actif : stop_streaming() avant tout appel synchrone")
+
+    def start_streaming(self, maxsize: int = 8) -> "queue.Queue":
+        """Lance l'acquisition en boucle dans un thread dédié ; retourne la queue de sortie.
+
+        La queue reçoit des `SweepResult`. Si le consommateur est plus lent que
+        l'appareil, les plus anciens résultats sont écartés (la queue ne bloque
+        jamais l'acquisition). En cas d'erreur (débranchement, timeout, ...) une
+        instance de `LiteVNAError` est mise dans la queue et le thread s'arrête.
+        Pendant le streaming, `configure_sweep`/`sweep` sont refusés : arrêter,
+        reconfigurer, relancer.
+        """
+        self._port()
+        if self.is_streaming:
+            raise LiteVNAError("streaming déjà actif")
+        if self.points < 1:
+            raise LiteVNAError("configure_sweep() doit être appelé avant start_streaming()")
+        q: "queue.Queue" = queue.Queue(maxsize=maxsize)
+        self._stop_evt.clear()
+        self._thread = threading.Thread(
+            target=self._stream_loop, args=(q,), name="litevna-stream", daemon=True
+        )
+        self._thread.start()
+        return q
+
+    def _stream_loop(self, q: "queue.Queue") -> None:
+        seq = 0
+        while not self._stop_evt.is_set():
+            try:
+                freqs, s_raw = self.sweep()
+            except LiteVNAError as e:
+                if not self._stop_evt.is_set():
+                    _put_latest(q, e)
+                return
+            except Exception as e:  # ne jamais laisser mourir le thread en silence
+                _put_latest(q, LiteVNAError(f"erreur inattendue en streaming: {e!r}"))
+                return
+            if self._stop_evt.is_set():
+                return
+            _put_latest(q, SweepResult(seq, time.time(), freqs, s_raw))
+            seq += 1
+
+    def stop_streaming(self, timeout: float = 10.0) -> None:
+        """Arrête le thread (attend la fin du sweep en cours). Idempotent."""
+        t = self._thread
+        if t is None:
+            return
+        self._stop_evt.set()
+        if threading.current_thread() is not t:
+            t.join(timeout)
+            if t.is_alive():
+                raise LiteVNATimeout("le thread de streaming ne s'arrête pas")
+        self._thread = None

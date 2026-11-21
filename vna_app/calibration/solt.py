@@ -11,6 +11,11 @@ Une calibration SOLT 12 termes n'est donc pas possible. On fait :
 - S21 : normalisation par le Thru (réponse en transmission) :
   S21_cal = S21_brut / S21_brut(thru). Ne corrige pas l'adaptation port 2.
 
+- Délai de câble (optionnel, variable) : si un câble coaxial 50 Ω relie le plan de
+  calibration au capteur, S11 est ramené au plan du capteur par
+  Γ_capteur = Γ_cal · exp(+j·2ω·τ) (aller-retour). Câble supposé sans perte et
+  adapté. S21 n'est pas modifié (la normalisation Thru est faite au plan de cal).
+
 Fichier .cal : npz (termes d'erreur) + métadonnées JSON.
 """
 
@@ -31,11 +36,14 @@ class CalibrationError(Exception):
 
 
 class Calibration:
-    def __init__(self, freqs, a, b, c, thru=None, meta: Optional[dict] = None):
+    def __init__(
+        self, freqs, a, b, c, thru=None, meta: Optional[dict] = None, delay_s: float = 0.0
+    ):
         self.freqs = np.asarray(freqs, dtype=float)
         self.a, self.b, self.c = (np.asarray(x, dtype=complex) for x in (a, b, c))
         self.thru = None if thru is None else np.asarray(thru, dtype=complex)
         self.meta = meta or {}
+        self.delay_s = float(delay_s)  # délai simple trajet plan de cal -> capteur (s)
 
     # -- construction ----------------------------------------------------------
     @classmethod
@@ -86,13 +94,19 @@ class Calibration:
                 "refaire la calibration pour ce sweep"
             )
 
-    def apply(self, freqs, s_raw):
-        """s_raw (N,2) [S11,S21] bruts -> (N,2) calibrés. S21 inchangé sans Thru."""
+    def apply(self, freqs, s_raw, delay_s: Optional[float] = None):
+        """s_raw (N,2) [S11,S21] bruts -> (N,2) calibrés. S21 inchangé sans Thru.
+
+        delay_s : délai simple trajet du câble (s) ; None -> self.delay_s.
+        """
         self._check_grid(freqs)
         s_raw = np.asarray(s_raw, dtype=complex)
         out = np.empty_like(s_raw)
         m = s_raw[:, 0]
         out[:, 0] = (m - self.a) / (self.b + self.c * m)
+        tau = self.delay_s if delay_s is None else float(delay_s)
+        if tau != 0.0:
+            out[:, 0] *= np.exp(2j * np.pi * np.asarray(freqs, dtype=float) * 2.0 * tau)
         out[:, 1] = s_raw[:, 1] / self.thru if self.thru is not None else s_raw[:, 1]
         return out
 
@@ -106,6 +120,7 @@ class Calibration:
             "b": self.b,
             "c": self.c,
             "meta": np.array(json.dumps(self.meta)),
+            "delay_s": np.array(self.delay_s),
         }
         if self.thru is not None:
             arrays["thru"] = self.thru
@@ -118,6 +133,9 @@ class Calibration:
         try:
             with np.load(path, allow_pickle=False) as d:
                 thru = d["thru"] if "thru" in d.files else None
-                return cls(d["freqs"], d["a"], d["b"], d["c"], thru, json.loads(str(d["meta"])))
+                delay = float(d["delay_s"]) if "delay_s" in d.files else 0.0
+                return cls(
+                    d["freqs"], d["a"], d["b"], d["c"], thru, json.loads(str(d["meta"])), delay
+                )
         except (OSError, KeyError, ValueError) as e:
             raise CalibrationError(f"fichier .cal illisible ({path}): {e}") from e
