@@ -11,7 +11,10 @@ L'utilisateur est ingénieur RF/embarqué : pas besoin de vulgariser, être pré
   Device : `/dev/litevna` (symlink udev vers `/dev/ttyACM0`).
 - Protocole : binaire NanoVNA V2 / SAA2 → voir `docs/protocol.md` (référence
   obligatoire avant de toucher au driver).
-- Débit : ~550 points/s en S11+S21. Un sweep 1001 pts ≈ 2 s. Max 65535 pts.
+- Débit mesuré (firmware 2.2, 0,4–3 GHz, S11+S21) : ~300 entrées FIFO/s, soit
+  ~300 points/s à averaging=1. Un sweep 1001 pts ≈ 3,3 s, 201 pts ≈ 0,67 s.
+  Le temps est proportionnel à `points × averaging` (averaging=4 → ~78 pts/s) ;
+  le goulot est le VNA, pas l'USB (~10 Ko/s utilisés). Max 65535 pts.
 - Les données renvoyées sont BRUTES (non calibrées). La calibration SOLT est
   faite côté hôte, jamais dans l'appareil.
 - Au-delà de 3 GHz la dynamique chute (>50 dB au lieu de >70 dB) ; la bande
@@ -72,3 +75,20 @@ Avant de proposer une modification comme terminée :
 ## Hors périmètre pour l'instant
 - Pas de calcul GPU (CuPy) tant que le post-traitement CPU suffit.
 - Pas de serveur web / API réseau ; GUI locale uniquement.
+
+## GNU Radio (gr-litevna)
+- `gr-litevna/` : blocs GRC en Python pur (Sweep Source, CW Source, Replay Source,
+  Sweep Sink), voir `gr-litevna/README.md`. `flowgraphs/` : exemples `.grc`.
+- `gr-litevna/` importe `vna_app.driver` et `vna_app.calibration` ; l'inverse est
+  interdit : `vna_app` ne doit jamais importer gnuradio.
+- Les blocs n'ouvrent pas le port série eux-mêmes : ils passent par
+  `open_device()` puis `LiteVNA.start_streaming()` et lisent la queue de `SweepResult`.
+- Ne jamais lever d'exception dans `start()` d'un bloc (GNU Radio s'y bloque) :
+  valider dans `__init__`, sinon journaliser et terminer le flowgraph (`work()` → -1).
+- Simulateur : `vna_app/driver/sim.py` (`open_device("sim")`). Enregistrements :
+  `vna_app/processing/record.py` et `python -m vna_app.cli record`.
+- Tests des blocs : `pytest gr-litevna/tests/qa_blocks.py` avec le Python de GNU
+  Radio, uniquement sur simulateur. Le `pytest` par défaut ne les lance pas.
+- La GUI et un flowgraph ne peuvent pas tenir `/dev/litevna` en même temps.
+- Non vérifié sur le banc à ce jour : exécution sous GNU Radio 3.8, matériel réel,
+  mode fréquence fixe (`gr-litevna/tools/check_fixed_freq.py`).

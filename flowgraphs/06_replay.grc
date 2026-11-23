@@ -1,0 +1,367 @@
+options:
+  parameters:
+    author: SurTouch
+    catch_exceptions: 'True'
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: ''
+    copyright: ''
+    description: "Rejoue un .npz (python -m vna_app.cli record, ou LiteVNA Sweep Sink)\
+      \ : m\xEAme affichage que 01, sans mat\xE9riel."
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: litevna_06_replay
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: LiteVNA - relecture d'un enregistrement
+    window_size: (1000,1000)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: f_step
+  id: variable
+  parameters:
+    comment: ''
+    value: (int(f_stop) - int(f_start)) // (points - 1)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1058, 110]
+    rotation: 0
+    state: enabled
+- name: speed
+  id: variable_qtgui_range
+  parameters:
+    comment: ''
+    gui_hint: ''
+    label: '''Vitesse de relecture'''
+    min_len: '200'
+    orient: QtCore.Qt.Horizontal
+    rangeType: float
+    start: '0.25'
+    step: '0.25'
+    stop: '20'
+    value: '1'
+    widget: counter_slider
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1268, 110]
+    rotation: 0
+    state: enabled
+- name: cal_file
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Fichier .cal (vide = tel quel)
+    short_id: ''
+    type: str
+    value: "''"
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [848, 110]
+    rotation: 0
+    state: enabled
+- name: db_s11
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [428, 240]
+    rotation: 0
+    state: enabled
+- name: db_s21
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [218, 370]
+    rotation: 0
+    state: enabled
+- name: f_start
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Start (Hz), pour l'axe
+    short_id: ''
+    type: eng_float
+    value: 400e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [428, 110]
+    rotation: 0
+    state: enabled
+- name: f_stop
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Stop (Hz), pour l'axe
+    short_id: ''
+    type: eng_float
+    value: 3e9
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [638, 110]
+    rotation: 0
+    state: enabled
+- name: filename
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Enregistrement .npz
+    short_id: f
+    type: str
+    value: '''data/demo_sim.npz'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 110]
+    rotation: 0
+    state: enabled
+- name: mag2_s11
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [218, 240]
+    rotation: 0
+    state: enabled
+- name: mag2_s21
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 370]
+    rotation: 0
+    state: enabled
+- name: points
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Points de l'enregistrement
+    short_id: ''
+    type: intx
+    value: '201'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [218, 110]
+    rotation: 0
+    state: enabled
+- name: rep_sink_db_0
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [848, 240]
+    rotation: 0
+    state: enabled
+- name: rep_sink_db_1
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [428, 370]
+    rotation: 0
+    state: enabled
+- name: sink_db
+  id: qtgui_vector_sink_f
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '1.0'
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: '''S11'''
+    label10: ''
+    label2: '''S21'''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    legend: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '''Module (relecture)'''
+    nconnections: '2'
+    ref_level: '0'
+    showports: 'False'
+    update_time: '0.10'
+    vlen: points
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    x_axis_label: "'Fr\xE9quence (MHz)'"
+    x_start: f_start / 1e6
+    x_step: f_step / 1e6
+    x_units: '""'
+    y_axis_label: '''dB'''
+    y_units: '""'
+    ymax: '10'
+    ymin: '-80'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [638, 240]
+    rotation: 0
+    state: enabled
+- name: vna
+  id: litevna_replay_source
+  parameters:
+    affinity: ''
+    alias: ''
+    cal_file: cal_file
+    comment: ''
+    filename: filename
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    points: points
+    realtime: 'True'
+    repeat: 'True'
+    speed: speed
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 240]
+    rotation: 0
+    state: enabled
+
+connections:
+- [db_s11, '0', rep_sink_db_0, '0']
+- [db_s21, '0', rep_sink_db_1, '0']
+- [mag2_s11, '0', db_s11, '0']
+- [mag2_s21, '0', db_s21, '0']
+- [rep_sink_db_0, '0', sink_db, '0']
+- [rep_sink_db_1, '0', sink_db, '1']
+- [vna, '0', mag2_s11, '0']
+- [vna, '1', mag2_s21, '0']
+
+metadata:
+  file_format: 1
+  grc_version: 3.10.9.2

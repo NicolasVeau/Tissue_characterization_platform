@@ -1,0 +1,628 @@
+options:
+  parameters:
+    author: SurTouch
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: ''
+    copyright: ''
+    description: "IFFT de S11 sans fen\xEAtre (r\xE9ponse temporelle), porte temporelle\
+      \ r\xE9glable, retour en fr\xE9quence."
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: litevna_03_ifft_gating
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: "LiteVNA - r\xE9ponse temporelle et time-gating de S11"
+    window_size: (1000,1000)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: f_step
+  id: variable
+  parameters:
+    comment: ''
+    value: (int(f_stop) - int(f_start)) // (points - 1)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1046, 39]
+    rotation: 0
+    state: enabled
+- name: gate
+  id: variable
+  parameters:
+    comment: ''
+    value: '[(1.0 if (i < gate_bins or i >= points - gate_bins) else 0.0) / points
+      for i in range(points)]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1865, 29]
+    rotation: 0
+    state: enabled
+- name: gate_bins
+  id: variable
+  parameters:
+    comment: ''
+    value: max(1, int(round(gate_ns / t_step_ns)))
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1676, 39]
+    rotation: 0
+    state: enabled
+- name: gate_ns
+  id: variable_qtgui_range
+  parameters:
+    comment: ''
+    gui_hint: ''
+    label: '''Porte temporelle (ns)'''
+    min_len: '200'
+    orient: Qt.Horizontal
+    rangeType: float
+    start: t_step_ns
+    step: t_step_ns
+    stop: points * t_step_ns / 2
+    value: '5'
+    widget: counter_slider
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1466, 39]
+    rotation: 0
+    state: enabled
+- name: t_step_ns
+  id: variable
+  parameters:
+    comment: ''
+    value: 1e9 / (points * f_step)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1256, 39]
+    rotation: 0
+    state: enabled
+- name: averaging
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Averaging
+    short_id: ''
+    type: intx
+    value: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [659, 32]
+    rotation: 0
+    state: enabled
+- name: cal_file
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Fichier .cal (vide = brut)
+    short_id: ''
+    type: str
+    value: '''/home/nveau/vna_app/bench8.cal'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [800, 20]
+    rotation: 0
+    state: enabled
+- name: db_gated
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1270, 238]
+    rotation: 0
+    state: enabled
+- name: db_s11
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [552, 152]
+    rotation: 0
+    state: enabled
+- name: db_time
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [899, 375]
+    rotation: 0
+    state: enabled
+- name: f_start
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Start (Hz)
+    short_id: ''
+    type: eng_float
+    value: 300e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [223, 31]
+    rotation: 0
+    state: enabled
+- name: f_stop
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Stop (Hz)
+    short_id: ''
+    type: eng_float
+    value: 1.3e9
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [364, 30]
+    rotation: 0
+    state: enabled
+- name: fft_fwd
+  id: fft_vxx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    fft_size: points
+    forward: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    nthreads: '1'
+    shift: 'False'
+    type: complex
+    window: '[]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [760, 222]
+    rotation: 0
+    state: enabled
+- name: gate_mult
+  id: blocks_multiply_const_vxx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    const: gate
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: complex
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [548, 245]
+    rotation: 0
+    state: enabled
+- name: ifft
+  id: fft_vxx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    fft_size: points
+    forward: 'False'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    nthreads: '1'
+    shift: 'False'
+    type: complex
+    window: '[]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [285, 261]
+    rotation: 0
+    state: enabled
+- name: mag2_gated
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1025, 254]
+    rotation: 0
+    state: enabled
+- name: mag2_s11
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [292, 169]
+    rotation: 0
+    state: enabled
+- name: mag2_time
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [565, 390]
+    rotation: 0
+    state: enabled
+- name: null_s21
+  id: blocks_null_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    bus_structure_sink: '[[0,],]'
+    comment: ''
+    num_inputs: '1'
+    type: complex
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [299, 454]
+    rotation: 0
+    state: enabled
+- name: points
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Points
+    short_id: ''
+    type: intx
+    value: '501'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [520, 23]
+    rotation: 0
+    state: enabled
+- name: port
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Port (/dev/litevna ou sim)
+    short_id: p
+    type: str
+    value: '''/dev/litevna'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 110]
+    rotation: 0
+    state: enabled
+- name: rep_sink_freq_0
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1011, 162]
+    rotation: 0
+    state: enabled
+- name: rep_sink_freq_1
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1486, 246]
+    rotation: 0
+    state: enabled
+- name: rep_sink_time_0
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1171, 384]
+    rotation: 0
+    state: enabled
+- name: sink_freq
+  id: qtgui_vector_sink_f
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '1.0'
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: '''S11'''
+    label10: ''
+    label2: "'S11 apr\xE8s porte'"
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: "'S11 brut et apr\xE8s porte'"
+    nconnections: '2'
+    ref_level: '0'
+    showports: 'False'
+    update_time: '0.10'
+    vlen: points
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    x_axis_label: "'Fr\xE9quence (MHz)'"
+    x_start: f_start / 1e6
+    x_step: f_step / 1e6
+    x_units: '""'
+    y_axis_label: '''dB'''
+    y_units: '""'
+    ymax: '10'
+    ymin: '-80'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1728, 124]
+    rotation: 0
+    state: enabled
+- name: sink_time
+  id: qtgui_vector_sink_f
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '1.0'
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: '''IFFT(S11)'''
+    label10: ''
+    label2: ''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: "'R\xE9ponse temporelle de S11'"
+    nconnections: '1'
+    ref_level: '0'
+    showports: 'False'
+    update_time: '0.10'
+    vlen: points
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    x_axis_label: '''Temps (ns)'''
+    x_start: '0'
+    x_step: t_step_ns
+    x_units: '""'
+    y_axis_label: "'dB (non normalis\xE9)'"
+    y_units: '""'
+    ymax: '60'
+    ymin: '-40'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1463, 327]
+    rotation: 0
+    state: enabled
+- name: vna
+  id: litevna_sweep_source
+  parameters:
+    affinity: ''
+    alias: ''
+    averaging: averaging
+    cal_file: cal_file
+    comment: ''
+    f_start: f_start
+    f_stop: f_stop
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    points: points
+    port: port
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 240]
+    rotation: 0
+    state: enabled
+
+connections:
+- [db_gated, '0', rep_sink_freq_1, '0']
+- [db_s11, '0', rep_sink_freq_0, '0']
+- [db_time, '0', rep_sink_time_0, '0']
+- [fft_fwd, '0', mag2_gated, '0']
+- [gate_mult, '0', fft_fwd, '0']
+- [ifft, '0', gate_mult, '0']
+- [ifft, '0', mag2_time, '0']
+- [mag2_gated, '0', db_gated, '0']
+- [mag2_s11, '0', db_s11, '0']
+- [mag2_time, '0', db_time, '0']
+- [rep_sink_freq_0, '0', sink_freq, '0']
+- [rep_sink_freq_1, '0', sink_freq, '1']
+- [rep_sink_time_0, '0', sink_time, '0']
+- [vna, '0', ifft, '0']
+- [vna, '0', mag2_s11, '0']
+- [vna, '1', null_s21, '0']
+
+metadata:
+  file_format: 1

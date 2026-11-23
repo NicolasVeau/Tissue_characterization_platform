@@ -38,6 +38,16 @@ class Worker(QObject):
             self._vna = None
         self.disconnected.emit()
 
+    @pyqtSlot(int, int)
+    def set_power(self, adf4350, si5351):
+        """Puissance source (0..3) ; sans appareil : ignoré (GUI renvoie avant chaque sweep)."""
+        if self._vna is None:
+            return
+        try:
+            self._vna.set_power(adf4350, si5351)
+        except (LiteVNAError, ValueError) as e:
+            self.error.emit(str(e))
+
     @pyqtSlot(float, float, int, int)
     def configure(self, start, stop, points, avg):
         if self._vna is None:

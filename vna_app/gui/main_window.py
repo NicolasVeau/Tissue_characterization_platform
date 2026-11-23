@@ -1,20 +1,28 @@
 from __future__ import annotations
 
+import os
+import time
+from pathlib import Path
+
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -22,10 +30,23 @@ from PyQt5.QtWidgets import (
 
 from vna_app.calibration import CalibrationError
 from vna_app.gui.smith import SmithChart
+from vna_app.gui.waterfall import Waterfall
 from vna_app.gui.worker import Worker
+from vna_app.processing.classifier import (
+    Dataset,
+    ZoneClassifier,
+    cross_validate,
+    features_for,
+    format_report,
+    grid_signature,
+)
+from vna_app.processing.compare import compare, mod_db, snapshot, unwrap_deg
 from vna_app.processing.export import write_s2p
+from vna_app.processing.impedance import gamma_to_z
 from vna_app.processing.permittivity import REFERENCE_LIQUIDS, to_eps_columns
 from vna_app.processing.pipeline import Pipeline
+from vna_app.processing.pressure import contact_level, normalize_shape, passes_contact
+from vna_app.processing.sweepfilter import SweepFilter
 
 EPS_MODES = [("off", "Désactivé"), ("capacitive", "Capacitif (C0)"), ("three_ref", "3 références")]
 CAL_LABELS = {"open": "Open", "short": "Short", "load": "Load", "thru": "Thru (S21)"}
@@ -37,11 +58,36 @@ def _db(x):
         return 20 * np.log10(np.abs(x))
 
 
+def _phase_unwrapped_deg(x):
+    return np.degrees(np.unwrap(np.angle(x)))
+
+
+ZONES = [
+    "nez",
+    "joue droite",
+    "joue gauche",
+    "index droit",
+    "majeur droit",
+    "index gauche",
+    "majeur gauche",
+    "avant-bras droit",
+    "avant-bras gauche",
+    "cuisse droite",
+    "cuisse gauche",
+    "paume",
+]
+
+LAST_CAL = Path(
+    os.environ.get("VNA_APP_LAST_CAL") or Path.home() / ".config" / "vna_app" / "last_cal"
+)
+
+
 class MainWindow(QMainWindow):
     _connect = pyqtSignal()
     _disconnect = pyqtSignal()
     _configure = pyqtSignal(float, float, int, int)
     _run = pyqtSignal(bool)
+    _power = pyqtSignal(int, int)
 
     def __init__(self, port: str = "/dev/litevna"):
         super().__init__()
@@ -54,11 +100,14 @@ class MainWindow(QMainWindow):
         self.pipeline = Pipeline()
         self.pending = None  # standard à capturer au prochain sweep
 
+        self.mem = {1: None, 2: None}  # Snapshot ou None
         tabs = QTabWidget()
-        tabs.addTab(self._build_acq_tab(), "Acquisition")
-        tabs.addTab(self._build_cal_tab(), "Calibration")
-        tabs.addTab(self._build_eps_tab(), "ε*")
-        tabs.setFixedWidth(300)
+        tabs.addTab(self._build_acq_tab(), "Acq.")
+        tabs.addTab(self._build_cal_tab(), "Cal.")
+        self.eps_tab_index = tabs.addTab(self._build_eps_tab(), "ε*")
+        self.cmp_tab_index = tabs.addTab(self._build_cmp_tab(), "Comp.")
+        self.cls_tab_index = tabs.addTab(self._build_cls_tab(), "Zone")
+        tabs.setFixedWidth(310)
         self.status = QLabel("Déconnecté")
         self.status.setWordWrap(True)
         side = QVBoxLayout()
@@ -68,31 +117,65 @@ class MainWindow(QMainWindow):
         side_w.setLayout(side)
         side_w.setFixedWidth(310)
 
-        self.plot11 = pg.PlotWidget(title="|S11| (brut)")
-        self.plot21 = pg.PlotWidget(title="|S21| (brut)")
+        self.plot11 = pg.PlotWidget(title="|Z| (brut)")
+        self.plot21 = pg.PlotWidget(title="Phase Z déroulée (brut)")
         self.plot_eps = pg.PlotWidget(title="ε*")
         for p in (self.plot11, self.plot21, self.plot_eps):
             p.setLabel("bottom", "Fréquence", units="Hz")
             p.showGrid(x=True, y=True)
-        self.plot11.setLabel("left", "dB")
-        self.plot21.setLabel("left", "dB")
+        self.plot11.setLabel("left", "|Z|", units="dBΩ")
+        self.plot21.setLabel("left", "Phase Z déroulée", units="°")
         self.plot_eps.setLabel("left", "ε', ε''")
         self.plot21.setXLink(self.plot11)
-        self.plot_eps.setXLink(self.plot11)
         self.plot_eps.addLegend()
         self.c11 = self.plot11.plot(pen=pg.mkPen("y", width=2))
         self.c21 = self.plot21.plot(pen=pg.mkPen("c", width=2))
         self.ceps1 = self.plot_eps.plot(pen=pg.mkPen("g", width=2), name="ε'")
         self.ceps2 = self.plot_eps.plot(pen=pg.mkPen("m", width=2), name="ε''")
         self.plot_eps.setVisible(False)
+        # onglet ε* : colonne gauche = Smith + spectre ε* ; colonne droite = UN waterfall au
+        # choix : ε' en couleur + isocontours ε'' (opt. 1) ou tan δ (opt. 2)
+        depth = self.wf_depth.value()
+        self.wf_iso = Waterfall(
+            "ε' (couleur) + isocontours ε''",
+            "ε'",
+            depth=depth,
+            aux_label="ε''",
+            n_iso=self.wf_niso.value(),
+        )
+        self.wf_tan = Waterfall("tan δ = ε''/ε' par sweep", "tan δ", depth=depth)
+        self.waterfalls = (self.wf_iso, self.wf_tan)
+        self.on_wf_scale()
+        self.smith_eps = SmithChart()
+        left = QVBoxLayout()
+        left.addWidget(self.smith_eps, 2)
+        left.addWidget(self.plot_eps, 1)
+        right = QVBoxLayout()
+        for w in (self.wf_iso, self.wf_tan):
+            right.addWidget(w, 1)
+        eps_cols = QHBoxLayout()
+        eps_cols.addLayout(left, 1)
+        eps_cols.addLayout(right, 1)
+        eps_page = QWidget()
+        eps_page.setLayout(eps_cols)
+        self.wf_select.currentIndexChanged.connect(self.on_wf_select)
+        self.on_wf_select(self.wf_select.currentIndex())
+
         plots = QVBoxLayout()
-        for p in (self.plot11, self.plot21, self.plot_eps):
+        for p in (self.plot11, self.plot21):
             plots.addWidget(p)
 
         self.smith = SmithChart()
         root = QHBoxLayout()
         root.addWidget(side_w)
-        root.addLayout(plots, 3)
+        live = QWidget()
+        live.setLayout(plots)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(live)  # 0 : acquisition / calibration
+        self.stack.addWidget(self._build_cmp_plots())  # 1 : comparaison
+        self.stack.addWidget(eps_page)  # 2 : ε*
+        root.addWidget(self.stack, 3)
+        tabs.currentChanged.connect(self.on_tab_changed)
         root.addWidget(self.smith, 2)
         c = QWidget()
         c.setLayout(root)
@@ -106,11 +189,13 @@ class MainWindow(QMainWindow):
         self._disconnect.connect(self.worker.disconnect_device)
         self._configure.connect(self.worker.configure)
         self._run.connect(self.worker.run)
+        self._power.connect(self.worker.set_power)
         self.worker.connected.connect(self.on_connected)
         self.worker.disconnected.connect(self.on_disconnected)
         self.worker.sweep_done.connect(self.on_sweep)
         self.worker.error.connect(self.on_error)
         self.thread.start()
+        self.load_last_cal()
         self.refresh_buttons()
 
     # -- construction des onglets ----------------------------------------------
@@ -122,7 +207,7 @@ class MainWindow(QMainWindow):
         self.stop_mhz.setRange(0.05, 6300)
         self.stop_mhz.setValue(3000)
         for w in (self.start_mhz, self.stop_mhz):
-            w.setDecimals(3)
+            w.setDecimals(6)
             w.setSuffix(" MHz")
         self.points = QSpinBox()
         self.points.setRange(2, 65535)
@@ -130,6 +215,8 @@ class MainWindow(QMainWindow):
         self.avg = QSpinBox()
         self.avg.setRange(1, 255)
         self.avg.setValue(1)
+        self.pwr_high = self._power_combo(3, "Puissance de la source au-dessus de ~140 MHz")
+        self.pwr_low = self._power_combo(1, "Puissance de la source en dessous de ~140 MHz")
         self.btn_conn = QPushButton("Connecter")
         self.btn_single = QPushButton("Sweep unique")
         self.btn_cont = QPushButton("Continu")
@@ -144,9 +231,40 @@ class MainWindow(QMainWindow):
         form.addRow("Fin", self.stop_mhz)
         form.addRow("Points", self.points)
         form.addRow("Moyenne", self.avg)
+        form.addRow("Puissance > 140 MHz", self.pwr_high)
+        form.addRow("Puissance < 140 MHz", self.pwr_low)
+        self.cal_lock = QLabel("")
+        self.cal_lock.setWordWrap(True)
+        self.filt = SweepFilter()
+        self.chk_filt = QCheckBox("Rejeter les sweeps incohérents")
+        self.chk_filt.setToolTip(
+            "Rejette un sweep si |Γ_fin − Γ_début| sort de [dmin, dmax] ou si un point "
+            "intermédiaire est à plus de R des deux extrémités (S11, calibré si appliqué)."
+        )
+        self.filt_sp = {}
+        fform = QFormLayout()
+        for key, label, val in (
+            ("d_min", "Distance extrémités min", self.filt.d_min),
+            ("d_max", "Distance extrémités max", self.filt.d_max),
+            ("radius", "Voisinage R", self.filt.radius),
+        ):
+            sp = QDoubleSpinBox()
+            sp.setRange(0.0, 10.0)
+            sp.setDecimals(3)
+            sp.setSingleStep(0.05)
+            sp.setValue(val)
+            sp.valueChanged.connect(self.on_filter)
+            self.filt_sp[key] = sp
+            fform.addRow(label, sp)
+        self.filt_info = QLabel("")
+        self.chk_filt.toggled.connect(self.on_filter)
         lay = QVBoxLayout()
         lay.addWidget(self.btn_conn)
         lay.addLayout(form)
+        lay.addWidget(self.cal_lock)
+        lay.addWidget(self.chk_filt)
+        lay.addLayout(fform)
+        lay.addWidget(self.filt_info)
         lay.addWidget(self.btn_single)
         lay.addWidget(self.btn_cont)
         lay.addWidget(self.btn_save)
@@ -222,8 +340,31 @@ class MainWindow(QMainWindow):
         form.addRow("C0 (capacitif)", self.c0_ff)
         form.addRow("Liquide de réf.", self.ref_liquid)
         form.addRow("Lissage (impair)", self.smooth)
+        self.chk_norm = QCheckBox("ε* normalisé (invariant au contact partiel)")
+        self.chk_norm.setToolTip(
+            "Trace u = (ε*−1)/(ε*−1)(f_réf) : Re u et −Im u. Supprime le facteur d'échelle "
+            "dû à la fraction de contact (pression). Sans effet sur les waterfalls."
+        )
+        self.f_ref_mhz = QDoubleSpinBox()
+        self.f_ref_mhz.setRange(0.05, 6300)
+        self.f_ref_mhz.setDecimals(1)
+        self.f_ref_mhz.setValue(1000.0)
+        self.f_ref_mhz.setSuffix(" MHz")
+        self.contact_min = QDoubleSpinBox()
+        self.contact_min.setRange(0.0, 1000.0)
+        self.contact_min.setDecimals(2)
+        self.contact_min.setSingleStep(0.5)
+        self.contact_min.setToolTip(
+            "Rejette les sweeps dont le niveau de contact médian |ε*−1| est inférieur (0 = off)"
+        )
+        self.contact_lbl = QLabel("Contact : —")
+        self.n_contact_rej = 0
+        form.addRow("f réf. normalisation", self.f_ref_mhz)
+        form.addRow("Contact min |ε*−1|", self.contact_min)
         lay = QVBoxLayout()
         lay.addLayout(form)
+        lay.addWidget(self.chk_norm)
+        lay.addWidget(self.contact_lbl)
         lay.addWidget(QLabel("Références (méthode 3 références, S11 brut) :"))
         self.eps_buttons = {}
         for k, label in EPS_LABELS.items():
@@ -236,15 +377,414 @@ class MainWindow(QMainWindow):
         self.btn_save_eps = QPushButton("Enregistrer ε* (.csv)…")
         lay.addWidget(self.eps_captured)
         lay.addWidget(self.btn_save_eps)
+
+        # waterfalls : historique et calibration des couleurs
+        lay.addWidget(QLabel("Waterfall (colonne de droite) :"))
+        self.wf_select = QComboBox()
+        self.wf_select.addItem("ε' + isocontours ε''")
+        self.wf_select.addItem("tan δ = ε''/ε'")
+        self.wf_depth = QSpinBox()
+        self.wf_depth.setRange(5, 2000)
+        self.wf_depth.setValue(100)
+        self.wf_auto = QCheckBox("Couleurs auto (1–99 %)")
+        self.wf_auto.setChecked(True)
+        self.wf_lim = {}
+        wform = QFormLayout()
+        wform.addRow("Affichage", self.wf_select)
+        wform.addRow("Sweeps conservés", self.wf_depth)
+        for key, lo, hi in (("re", 1.0, 100.0), ("tan", 0.0, 1.0)):
+            for end, v in (("min", lo), ("max", hi)):
+                sp = QDoubleSpinBox()
+                sp.setRange(-1e5, 1e5)
+                sp.setDecimals(2)
+                sp.setValue(v)
+                sp.setButtonSymbols(QAbstractSpinBox.NoButtons)
+                sp.setEnabled(False)
+                sp.valueChanged.connect(self.on_wf_scale)
+                self.wf_lim[key, end] = sp
+        for key, name in (("re", "ε'"), ("tan", "tan δ")):
+            lo, hi = self.wf_lim[key, "min"], self.wf_lim[key, "max"]
+            wform.addRow(f"{name} min / max", self._pair(lo, hi))
+        self.wf_niso = QSpinBox()
+        self.wf_niso.setRange(0, 30)
+        self.wf_niso.setValue(6)
+        self.wf_niso.setToolTip("Isocontours de ε'' sur le waterfall ε' (0 = aucun)")
+        wform.addRow("Isocontours ε''", self.wf_niso)
+        btn_wf_clear = QPushButton("Effacer les waterfalls")
+        btn_wf_clear.clicked.connect(self.clear_waterfalls)
+        lay.addWidget(self.wf_auto)
+        lay.addLayout(wform)
+        lay.addWidget(btn_wf_clear)
+        self.wf_auto.toggled.connect(self.on_wf_scale)
+        self.wf_depth.valueChanged.connect(self.on_wf_depth)
+        self.wf_niso.valueChanged.connect(lambda n: self.wf_iso.set_n_iso(n))
         lay.addStretch(1)
         self.eps_mode.currentIndexChanged.connect(self.on_eps_params)
         self.c0_ff.valueChanged.connect(self.on_eps_params)
         self.ref_liquid.currentIndexChanged.connect(self.on_eps_params)
         self.smooth.valueChanged.connect(self.on_eps_params)
+        self.chk_norm.toggled.connect(self.on_norm)
+        self.f_ref_mhz.valueChanged.connect(self.on_norm)
+        self.contact_min.valueChanged.connect(self.on_contact_min)
         self.btn_save_eps.clicked.connect(self.save_eps)
         w = QWidget()
         w.setLayout(lay)
         return w
+
+    @staticmethod
+    def _pair(a, b):
+        w = QWidget()
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(a)
+        row.addWidget(b)
+        w.setLayout(row)
+        return w
+
+    def _build_cmp_tab(self):
+        self.btn_mem = {}
+        self.mem_labels = {}
+        lay = QVBoxLayout()
+        for n in (1, 2):
+            b = QPushButton(f"Mémoire {n}")
+            b.setToolTip("Mémorise la mesure affichée (Z, et ε* si actif)")
+            b.clicked.connect(lambda _=False, n=n: self.store_memory(n))
+            c = QPushButton("Effacer")
+            c.clicked.connect(lambda _=False, n=n: self.clear_memory(n))
+            row = QHBoxLayout()
+            row.addWidget(b, 2)
+            row.addWidget(c, 1)
+            self.btn_mem[n] = b
+            self.mem_labels[n] = QLabel(f"Mémoire {n} : vide")
+            self.mem_labels[n].setWordWrap(True)
+            lay.addLayout(row)
+            lay.addWidget(self.mem_labels[n])
+        note = QLabel("Différences = mémoire 2 − mémoire 1 (phase : arg(Z2/Z1) déroulé).")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addStretch(1)
+        w = QWidget()
+        w.setLayout(lay)
+        return w
+
+    def _build_cmp_plots(self):
+        grid = QGridLayout()
+        rows = [
+            ("|Z| — mémoires 1 et 2", "|Z|", "dBΩ", "Δ|Z| (2 − 1)", "dB"),
+            ("arg Z déroulé — mémoires 1 et 2", "arg Z", "°", "Δarg Z (2 − 1)", "°"),
+            ("ε', ε'' — mémoires 1 et 2", "ε', ε''", None, "Δε', Δε'' (2 − 1)", None),
+        ]
+        plots = []
+        first = None
+        for row, (t1, l1, u1, t2, u2) in enumerate(rows):
+            left = pg.PlotWidget(title=t1)
+            right = pg.PlotWidget(title=t2)
+            left.setLabel("left", l1, units=u1)
+            right.setLabel("left", "Δ", units=u2)
+            for p in (left, right):
+                p.setLabel("bottom", "Fréquence", units="Hz")
+                p.showGrid(x=True, y=True)
+                p.addLegend()
+                if first is None:
+                    first = p
+                else:
+                    p.setXLink(first)
+            grid.addWidget(left, row, 0)
+            grid.addWidget(right, row, 1)
+            plots.append((left, right))
+        w = QWidget()
+        w.setLayout(grid)
+        dash = pg.QtCore.Qt.DashLine
+        p1 = pg.mkPen("y", width=2)
+        p2 = pg.mkPen("c", width=2)
+        pd = pg.mkPen("r", width=2)
+        p1b = pg.mkPen("y", width=2, style=dash)
+        p2b = pg.mkPen("c", width=2, style=dash)
+        pdb = pg.mkPen("m", width=2, style=dash)
+        (zl, zr), (al, ar), (el, er) = plots
+        self.cmp_curves = {
+            "mod1": zl.plot(pen=p1, name="Mémoire 1"),
+            "mod2": zl.plot(pen=p2, name="Mémoire 2"),
+            "dmod": zr.plot(pen=pd, name="Δ|Z|"),
+            "arg1": al.plot(pen=p1, name="Mémoire 1"),
+            "arg2": al.plot(pen=p2, name="Mémoire 2"),
+            "darg": ar.plot(pen=pd, name="Δarg Z"),
+            "e1re": el.plot(pen=p1, name="ε' mém. 1"),
+            "e2re": el.plot(pen=p2, name="ε' mém. 2"),
+            "e1im": el.plot(pen=p1b, name="ε'' mém. 1"),
+            "e2im": el.plot(pen=p2b, name="ε'' mém. 2"),
+            "dere": er.plot(pen=pd, name="Δε'"),
+            "deim": er.plot(pen=pdb, name="Δε''"),
+        }
+        return w
+
+    # -- identification de la zone
+    def _build_cls_tab(self):
+        self.ds = Dataset()
+        self.model = None
+        self.rec = None  # {"zone", "session", "left"} pendant un enregistrement
+        self.zone_box = QComboBox()
+        self.zone_box.setEditable(True)
+        self.zone_box.addItems(ZONES)
+        self.rec_n = QSpinBox()
+        self.rec_n.setRange(1, 500)
+        self.rec_n.setValue(10)
+        self.btn_rec = QPushButton("Enregistrer une pose")
+        self.btn_rec.setToolTip("Enregistre les N prochains sweeps acceptés (ε* actif requis)")
+        self.ds_info = QLabel("")
+        self.btn_ds_save = QPushButton("Enregistrer le jeu…")
+        self.btn_ds_load = QPushButton("Charger un jeu…")
+        self.btn_ds_clear = QPushButton("Vider")
+        self.shrink = QDoubleSpinBox()
+        self.shrink.setRange(0.0, 1.0)
+        self.shrink.setSingleStep(0.05)
+        self.shrink.setValue(0.2)
+        self.shrink.setToolTip(
+            "Rétrécissement de la covariance (0 = LDA pur, 1 = distances euclidiennes)"
+        )
+        self.btn_train = QPushButton("Entraîner et valider")
+        self.chk_live = QCheckBox("Prédiction en direct")
+        self.cls_label = QLabel("Zone : —")
+        self.cls_label.setWordWrap(True)
+        self.cls_label.setStyleSheet("font-size: 15px; font-weight: bold;")
+        self.cls_report = QPlainTextEdit()
+        self.cls_report.setReadOnly(True)
+        self.cls_report.setStyleSheet("font-family: monospace; font-size: 11px;")
+        form = QFormLayout()
+        form.addRow("Zone", self.zone_box)
+        form.addRow("Sweeps / pose", self.rec_n)
+        form.addRow("Rétrécissement λ", self.shrink)
+        lay = QVBoxLayout()
+        lay.addLayout(form)
+        for w in (
+            self.btn_rec,
+            self.ds_info,
+            self.btn_ds_save,
+            self.btn_ds_load,
+            self.btn_ds_clear,
+            self.btn_train,
+            self.chk_live,
+            self.cls_label,
+            self.cls_report,
+        ):
+            lay.addWidget(w)
+        self.btn_rec.clicked.connect(self.start_recording)
+        self.btn_ds_save.clicked.connect(self.save_dataset)
+        self.btn_ds_load.clicked.connect(self.load_dataset)
+        self.btn_ds_clear.clicked.connect(self.clear_dataset)
+        self.btn_train.clicked.connect(self.train_model)
+        self.update_ds_info()
+        w = QWidget()
+        w.setLayout(lay)
+        return w
+
+    def update_ds_info(self):
+        d = self.ds
+        zones = sorted(set(d.zones))
+        txt = f"Jeu : {len(d)} sweeps, {len(zones)} zones, {len(set(d.sessions))} poses"
+        if self.rec:
+            txt += f"\nEnregistrement {self.rec['session']} : {self.rec['left']} restants"
+        self.ds_info.setText(txt)
+
+    def _cls_params(self):
+        return float(self.ds.meta.get("f_ref", self.f_ref_mhz.value() * 1e6))
+
+    def start_recording(self):
+        zone = self.zone_box.currentText().strip()
+        if not zone:
+            QMessageBox.warning(self, "Zone", "Donne un nom de zone.")
+            return
+        if self.pipeline.eps_mode == "off":
+            QMessageBox.warning(
+                self, "Zone", "Active une méthode ε* (onglet ε*) : les descripteurs en dépendent."
+            )
+            return
+        if self.last is None:
+            QMessageBox.warning(self, "Zone", "Aucun sweep reçu : lance l'acquisition.")
+            return
+        sig = grid_signature(self.last[0])
+        if len(self.ds) == 0:
+            self.ds.meta = {"f_ref": self.f_ref_mhz.value() * 1e6, "n_bands": 8, "grid": sig}
+        elif not np.allclose(self.ds.meta.get("grid", sig), sig, atol=1.0):
+            QMessageBox.warning(self, "Zone", "Grille de fréquences différente de celle du jeu.")
+            return
+        self.rec = {"zone": zone, "session": self.ds.new_session(zone), "left": self.rec_n.value()}
+        self.status.setText(f"Enregistrement {self.rec['session']}…")
+        self.update_ds_info()
+
+    def collect_sweep(self, freqs):
+        if self.rec is None or self.result is None:
+            return
+        x = features_for(freqs, self.result.eps, self._cls_params(), self.ds.meta.get("n_bands", 8))
+        if x is None:
+            self.status.setText("Descripteurs indisponibles (ε* actif ? contact ?)")
+            return
+        self.ds.add(x, self.rec["zone"], self.rec["session"])
+        self.rec["left"] -= 1
+        if self.rec["left"] <= 0:
+            self.status.setText(f"Pose {self.rec['session']} enregistrée")
+            self.rec = None
+        self.update_ds_info()
+
+    def train_model(self):
+        if len(self.ds) == 0:
+            QMessageBox.warning(self, "Zone", "Jeu vide.")
+            return
+        X, z, s = self.ds.arrays()
+        lam = self.shrink.value()
+        try:
+            res = cross_validate(X, z, s, shrinkage=lam)
+            model = ZoneClassifier(lam).fit(X, z)
+        except ValueError as e:
+            self.cls_report.setPlainText(f"Entraînement impossible : {e}")
+            return
+        model.d2_max = res["d2_max"]
+        self.model = model
+        self.cls_report.setPlainText(format_report(res, lam))
+        self.status.setText("Modèle entraîné")
+
+    def classify_sweep(self, freqs):
+        if not self.chk_live.isChecked() or self.model is None or self.result is None:
+            return
+        meta = self.ds.meta
+        if not np.allclose(
+            meta.get("grid", grid_signature(freqs)), grid_signature(freqs), atol=1.0
+        ):
+            self.cls_label.setText("Zone : grille différente de l'apprentissage")
+            return
+        x = features_for(freqs, self.result.eps, self._cls_params(), meta.get("n_bands", 8))
+        if x is None:
+            self.cls_label.setText("Zone : — (pas de contact / ε* indisponible)")
+            return
+        best, proba, dmin = self.model.predict_one(x)
+        top = sorted(proba.items(), key=lambda kv: -kv[1])[:3]
+        detail = " | ".join(f"{k} {100 * v:.0f} %" for k, v in top)
+        head = best if best is not None else "Inconnue"
+        self.cls_label.setText(f"Zone : {head}\n{detail}\n(d² = {dmin:.1f})")
+
+    def save_dataset(self):
+        if len(self.ds) == 0:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Enregistrer le jeu", "zones.npz", "NumPy (*.npz)"
+        )
+        if path:
+            self.ds.save(path if path.endswith(".npz") else path + ".npz")
+            self.status.setText(f"Jeu enregistré : {path}")
+
+    def load_dataset(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Charger un jeu", "", "NumPy (*.npz)")
+        if not path:
+            return
+        try:
+            self.ds = Dataset.load(path)
+        except (OSError, ValueError, KeyError) as e:
+            QMessageBox.warning(self, "Zone", f"Jeu illisible : {e}")
+            return
+        self.model = None
+        self.update_ds_info()
+
+    def clear_dataset(self):
+        self.ds = Dataset()
+        self.model = None
+        self.rec = None
+        self.update_ds_info()
+
+    # -- comparaison
+    def on_tab_changed(self, idx):
+        if idx in (self.eps_tab_index, self.cls_tab_index):  # page ε* : son propre Smith
+            self.stack.setCurrentIndex(2)
+            self.smith.setVisible(False)
+        else:
+            self.stack.setCurrentIndex(1 if idx == self.cmp_tab_index else 0)
+            self.smith.setVisible(True)
+
+    # -- waterfalls (ε' + isocontours ε'', ou tan δ)
+    def on_wf_scale(self, *_):
+        auto = self.wf_auto.isChecked()
+        groups = (
+            ("re", (self.wf_iso,)),  # échelle de couleurs de ε' (isocontours = ε'')
+            ("tan", (self.wf_tan,)),
+        )
+        for key, wfs in groups:
+            lo, hi = self.wf_lim[key, "min"], self.wf_lim[key, "max"]
+            lo.setEnabled(not auto)
+            hi.setEnabled(not auto)
+            for wf in wfs:
+                wf.set_manual_levels(lo.value(), hi.value())
+                wf.set_auto(auto)
+            if auto:  # affiche les bornes réellement appliquées
+                for sp, v in ((lo, wfs[0].levels[0]), (hi, wfs[0].levels[1])):
+                    sp.blockSignals(True)
+                    sp.setValue(v)
+                    sp.blockSignals(False)
+
+    def on_wf_select(self, idx):
+        """Un seul waterfall visible (les deux reçoivent les données : l'historique reste)."""
+        self.wf_iso.setVisible(idx == 0)
+        self.wf_tan.setVisible(idx == 1)
+
+    def on_wf_depth(self, n):
+        for wf in self.waterfalls:
+            wf.set_depth(n)
+
+    def clear_waterfalls(self):
+        for wf in self.waterfalls:
+            wf.clear_data()
+
+    def push_waterfalls(self, freqs):
+        r = self.result
+        if r is None or r.eps is None:
+            return
+        e1, e2, tan = to_eps_columns(r.eps)
+        self.wf_iso.push(freqs, e1, aux=e2)
+        self.wf_tan.push(freqs, tan)
+        if self.wf_auto.isChecked():
+            self.on_wf_scale()
+
+    def store_memory(self, n):
+        if self.result is None or self.last is None:
+            self.status.setText("Rien à mémoriser : faire d'abord un sweep")
+            return
+        r, freqs = self.result, self.last[0]
+        tag = "calibré" if r.calibrated else "brut"
+        eps = "ε* oui" if r.eps is not None else "ε* non"
+        label = f"{len(freqs)} pts, {tag}, {eps}, {time.strftime('%H:%M:%S')}"
+        self.mem[n] = snapshot(freqs, r.s[:, 0], r.eps, label)
+        self.mem_labels[n].setText(f"Mémoire {n} : {label}")
+        self.update_comparison()
+
+    def clear_memory(self, n):
+        self.mem[n] = None
+        self.mem_labels[n].setText(f"Mémoire {n} : vide")
+        self.update_comparison()
+
+    def update_comparison(self):
+        a, b = self.mem[1], self.mem[2]
+        c = self.cmp_curves
+        for cur in c.values():
+            cur.setData([], [])
+        for snap, k in ((a, "1"), (b, "2")):
+            if snap is None:
+                continue
+            c["mod" + k].setData(snap.freqs, mod_db(snap.z))
+            c["arg" + k].setData(snap.freqs, unwrap_deg(snap.z))
+            if snap.eps is not None:
+                c[f"e{k}re"].setData(snap.freqs, snap.eps.real)
+                c[f"e{k}im"].setData(snap.freqs, -snap.eps.imag)
+        if a is not None and b is not None:
+            d = compare(a, b)
+            f = d["freqs"]
+            # mémoire 2 réaffichée sur la grille de la mémoire 1
+            c["mod2"].setData(f, d["mod2_db"])
+            c["arg2"].setData(f, d["arg2_deg"])
+            c["dmod"].setData(f, d["d_mod_db"])
+            c["darg"].setData(f, d["d_arg_deg"])
+            if d["eps1_re"] is not None:
+                c["e2re"].setData(f, d["eps2_re"])
+                c["e2im"].setData(f, d["eps2_im"])
+                c["dere"].setData(f, d["d_eps_re"])
+                c["deim"].setData(f, d["d_eps_im"])
 
     # -- état
     def refresh_buttons(self):
@@ -289,7 +829,80 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "vna_app", msg)
 
     # -- acquisition
+    def _power_combo(self, default, tip):
+        cb = QComboBox()
+        for lvl, txt in enumerate(("0 (min)", "1", "2", "3 (max)")):
+            cb.addItem(txt, lvl)
+        cb.setCurrentIndex(default)
+        cb.setToolTip(
+            tip + ". Niveaux 0 à 3 du registre de l'appareil (≈ 2,5 dB de bruit de fond S21 "
+            "par pas mesurés). Un niveau plus bas réduit le SNR ; la calibration reste "
+            "valable seulement pour la puissance à laquelle elle a été faite."
+        )
+        cb.currentIndexChanged.connect(self.on_power)
+        return cb
+
+    def on_power(self, *_):
+        if self.connected:
+            self._power.emit(self.pwr_high.currentData(), self.pwr_low.currentData())
+
+    def align_to_cal(self):
+        """Début/fin/points = grille de la calibration appliquée (sauf capture de standard)."""
+        p = self.pipeline
+        if p.cal is None or not p.apply_cal:
+            self.cal_lock.setText("")
+            for w in (self.start_mhz, self.stop_mhz, self.points):
+                w.setEnabled(True)
+            return
+        f = p.cal.freqs
+        for w, v in (
+            (self.start_mhz, f[0] / 1e6),
+            (self.stop_mhz, f[-1] / 1e6),
+            (self.points, len(f)),
+        ):
+            w.blockSignals(True)
+            w.setValue(v)
+            w.blockSignals(False)
+            w.setEnabled(False)
+        self.cal_lock.setText(
+            f"Grille imposée par la calibration : {f[0] / 1e6:.3f}–{f[-1] / 1e6:.3f} MHz, "
+            f"{len(f)} pts (décocher « Appliquer la calibration » pour la libérer)"
+        )
+
+    def on_norm(self, *_):
+        self.plot_eps.setLabel("left", "Re u, −Im u" if self.chk_norm.isChecked() else "ε', ε''")
+        self.redisplay()
+
+    def on_contact_min(self, *_):
+        self.n_contact_rej = 0
+        self.update_contact_label()
+
+    def update_contact_label(self, level=None):
+        txt = "Contact : —" if level is None else f"Contact |ε*−1| = {level:.2f}"
+        if self.contact_min.value() > 0:
+            txt += f" (seuil {self.contact_min.value():.2f}, rejetés {self.n_contact_rej})"
+        self.contact_lbl.setText(txt)
+
+    def on_filter(self, *_):
+        f = self.filt
+        f.enabled = self.chk_filt.isChecked()
+        f.d_min = self.filt_sp["d_min"].value()
+        f.d_max = self.filt_sp["d_max"].value()
+        f.radius = self.filt_sp["radius"].value()
+        f.reset_counts()
+        self.update_filter_info()
+
+    def update_filter_info(self, why=None):
+        f = self.filt
+        txt = f"Acceptés {f.accepted} / rejetés {f.rejected}" if f.enabled else ""
+        if why:
+            txt += f"\nDernier rejet : {why}"
+        self.filt_info.setText(txt)
+
     def start(self, continuous):
+        if self.pending is None:
+            self.align_to_cal()
+        self._power.emit(self.pwr_high.currentData(), self.pwr_low.currentData())
         self._configure.emit(
             self.start_mhz.value() * 1e6,
             self.stop_mhz.value() * 1e6,
@@ -317,6 +930,20 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Capture {name}…")
 
     def on_sweep(self, freqs, s_raw, params):
+        is_capture = self.pending is not None
+        if not is_capture and (self.filt.enabled or self.contact_min.value() > 0):
+            r = self.pipeline.process(freqs, s_raw)
+            if self.filt.enabled:
+                ok, why = self.filt.check(r.s[:, 0])
+                self.update_filter_info(why)
+                if not ok:
+                    self.status.setText(f"Sweep rejeté : {why}")
+                    return
+            if passes_contact(r.eps, self.contact_min.value()) is False:
+                self.n_contact_rej += 1
+                self.update_contact_label(contact_level(r.eps))
+                self.status.setText("Sweep rejeté : contact insuffisant")
+                return
         self.last = (freqs, s_raw, params)
         if self.pending is not None:
             name, self.pending = self.pending, None
@@ -324,6 +951,10 @@ class MainWindow(QMainWindow):
             self.update_captured_labels()
             self.status.setText(f"{name} capturé ({len(freqs)} pts)")
         self.redisplay()
+        if not is_capture:  # les sweeps de standards ne vont pas dans les waterfalls
+            self.push_waterfalls(freqs)
+            self.collect_sweep(freqs)
+            self.classify_sweep(freqs)
 
     def redisplay(self):
         if self.last is None:
@@ -332,16 +963,26 @@ class MainWindow(QMainWindow):
         self.result = self.pipeline.process(freqs, s_raw)
         r = self.result
         tag = "calibré" if r.calibrated else "brut"
-        self.plot11.setTitle(f"|S11| ({tag})")
-        self.plot21.setTitle(f"|S21| ({tag})")
-        self.c11.setData(freqs, _db(r.s[:, 0]))
-        self.c21.setData(freqs, _db(r.s[:, 1]))
+        z = gamma_to_z(r.s[:, 0])
+        self.plot11.setTitle(f"|Z| ({tag})")
+        self.plot21.setTitle(f"Phase Z déroulée ({tag})")
+        self.c11.setData(freqs, _db(z))
+        self.c21.setData(freqs, _phase_unwrapped_deg(z))
         self.smith.setTitle(f"Smith — S11 ({tag})")
         self.smith.set_gamma(r.s[:, 0])
+        self.smith_eps.setTitle(f"Smith — S11 ({tag})")
+        self.smith_eps.set_gamma(r.s[:, 0])
         show_eps = r.eps is not None
         self.plot_eps.setVisible(self.pipeline.eps_mode != "off")
         if show_eps:
             e1, e2, _ = to_eps_columns(r.eps)
+            self.update_contact_label(contact_level(r.eps))
+            if self.chk_norm.isChecked():
+                try:
+                    u = normalize_shape(freqs, r.eps, self.f_ref_mhz.value() * 1e6)
+                    e1, e2 = u.real, -u.imag
+                except ValueError as e:
+                    r.notes.append(f"normalisation impossible : {e}")
             self.ceps1.setData(freqs, e1)
             self.ceps2.setData(freqs, e2)
         else:
@@ -377,7 +1018,34 @@ class MainWindow(QMainWindow):
             + ("" if path else " (non enregistrée)")
         )
         self._set_chk(True)
+        self.align_to_cal()
+        if path:
+            self.remember_cal(path)
         self.redisplay()
+
+    def remember_cal(self, path):
+        try:
+            LAST_CAL.parent.mkdir(parents=True, exist_ok=True)
+            LAST_CAL.write_text(str(path))
+        except OSError:
+            pass
+
+    def load_last_cal(self):
+        """Charge la dernière calibration enregistrée/chargée (défaut au démarrage)."""
+        try:
+            path = LAST_CAL.read_text().strip()
+            if not path or not Path(path).is_file():
+                return False
+            cal = self.pipeline.load_cal(path)
+        except (OSError, CalibrationError):
+            return False
+        self._sync_delay()
+        self.cal_info.setText(
+            f"{path} — {len(cal.freqs)} pts, {cal.freqs[0] / 1e6:.0f}–{cal.freqs[-1] / 1e6:.0f} MHz"
+        )
+        self._set_chk(True)
+        self.align_to_cal()
+        return True
 
     def load_cal(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -396,6 +1064,8 @@ class MainWindow(QMainWindow):
             f"{path} — {len(cal.freqs)} pts, {cal.freqs[0] / 1e6:.0f}–{cal.freqs[-1] / 1e6:.0f} MHz"
         )
         self._set_chk(True)
+        self.align_to_cal()
+        self.remember_cal(path)
         self.redisplay()
 
     def _set_chk(self, on):
@@ -418,6 +1088,7 @@ class MainWindow(QMainWindow):
 
     def on_apply_cal(self, on):
         self.pipeline.apply_cal = on
+        self.align_to_cal()
         self.redisplay()
 
     # -- ε*
@@ -427,6 +1098,7 @@ class MainWindow(QMainWindow):
         p.c0 = self.c0_ff.value() * 1e-15
         p.ref_liquid = self.ref_liquid.currentText()
         p.smooth = self.smooth.value()
+        self.clear_waterfalls()  # les valeurs précédentes ne correspondent plus à ces réglages
         self.redisplay()
 
     def save_eps(self):

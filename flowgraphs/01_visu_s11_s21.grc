@@ -1,0 +1,506 @@
+options:
+  parameters:
+    author: SurTouch
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: ''
+    copyright: ''
+    description: Affichage en direct de |S11|, |S21| (dB) et de leur phase.
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: litevna_01_visu
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: LiteVNA - S11/S21 module et phase
+    window_size: (1000,1000)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: f_step
+  id: variable
+  parameters:
+    comment: ''
+    value: (int(f_stop) - int(f_start)) // (points - 1)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1264, 19]
+    rotation: 0
+    state: enabled
+- name: arg_s11
+  id: blocks_complex_to_arg
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [508, 363]
+    rotation: 0
+    state: enabled
+- name: arg_s21
+  id: blocks_complex_to_arg
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [502, 501]
+    rotation: 0
+    state: enabled
+- name: averaging
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Averaging
+    short_id: ''
+    type: intx
+    value: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [844, 19]
+    rotation: 0
+    state: enabled
+- name: cal_file
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Fichier .cal (vide = brut)
+    short_id: ''
+    type: str
+    value: '''/home/nveau/vna_app/bench8.cal'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1054, 19]
+    rotation: 0
+    state: enabled
+- name: db_s11
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [808, 238]
+    rotation: 0
+    state: enabled
+- name: db_s21
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [797, 604]
+    rotation: 0
+    state: enabled
+- name: f_start
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Start (Hz)
+    short_id: ''
+    type: eng_float
+    value: 300e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [214, 19]
+    rotation: 0
+    state: enabled
+- name: f_stop
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Stop (Hz)
+    short_id: ''
+    type: eng_float
+    value: 1.3e9
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [424, 19]
+    rotation: 0
+    state: enabled
+- name: mag2_s11
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [507, 254]
+    rotation: 0
+    state: enabled
+- name: mag2_s21
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [493, 622]
+    rotation: 0
+    state: enabled
+- name: points
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Points
+    short_id: ''
+    type: intx
+    value: '501'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [634, 19]
+    rotation: 0
+    state: enabled
+- name: port
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Port (/dev/litevna ou sim)
+    short_id: p
+    type: str
+    value: '''/dev/litevna'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1382, 20]
+    rotation: 0
+    state: enabled
+- name: rep_sink_db_0
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1051, 245]
+    rotation: 0
+    state: enabled
+- name: rep_sink_db_1
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1053, 612]
+    rotation: 0
+    state: enabled
+- name: rep_sink_phase_0
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [801, 356]
+    rotation: 0
+    state: enabled
+- name: rep_sink_phase_1
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [803, 492]
+    rotation: 0
+    state: enabled
+- name: sink_db
+  id: qtgui_vector_sink_f
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '1.0'
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: '''S11'''
+    label10: ''
+    label2: '''S21'''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '''Module'''
+    nconnections: '2'
+    ref_level: '0'
+    showports: 'False'
+    update_time: '0.10'
+    vlen: points
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    x_axis_label: "'Fr\xE9quence (MHz)'"
+    x_start: f_start / 1e6
+    x_step: f_step / 1e6
+    x_units: '""'
+    y_axis_label: '''dB'''
+    y_units: '""'
+    ymax: '10'
+    ymin: '-120'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1438, 383]
+    rotation: 0
+    state: enabled
+- name: sink_phase
+  id: qtgui_vector_sink_f
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '1.0'
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: '''S11'''
+    label10: ''
+    label2: '''S21'''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '''Phase'''
+    nconnections: '2'
+    ref_level: '0'
+    showports: 'False'
+    update_time: '0.10'
+    vlen: points
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    x_axis_label: "'Fr\xE9quence (MHz)'"
+    x_start: f_start / 1e6
+    x_step: f_step / 1e6
+    x_units: '""'
+    y_axis_label: '''rad'''
+    y_units: '""'
+    ymax: '3.2'
+    ymin: '-3.2'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1029, 370]
+    rotation: 0
+    state: enabled
+- name: vna
+  id: litevna_sweep_source
+  parameters:
+    affinity: ''
+    alias: ''
+    averaging: averaging
+    cal_file: cal_file
+    comment: ''
+    f_start: f_start
+    f_stop: f_stop
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    points: points
+    port: port
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [166, 437]
+    rotation: 0
+    state: enabled
+
+connections:
+- [arg_s11, '0', rep_sink_phase_0, '0']
+- [arg_s21, '0', rep_sink_phase_1, '0']
+- [db_s11, '0', rep_sink_db_0, '0']
+- [db_s21, '0', rep_sink_db_1, '0']
+- [mag2_s11, '0', db_s11, '0']
+- [mag2_s21, '0', db_s21, '0']
+- [rep_sink_db_0, '0', sink_db, '0']
+- [rep_sink_db_1, '0', sink_db, '1']
+- [rep_sink_phase_0, '0', sink_phase, '0']
+- [rep_sink_phase_1, '0', sink_phase, '1']
+- [vna, '0', arg_s11, '0']
+- [vna, '0', mag2_s11, '0']
+- [vna, '1', arg_s21, '0']
+- [vna, '1', mag2_s21, '0']
+
+metadata:
+  file_format: 1
