@@ -29,14 +29,20 @@ _KERNEL = np.ones((3, 3), np.uint8)
 
 
 class RingTracker:
-    """Les attributs sont modifiables à chaud (lus à chaque trame, écriture atomique GIL)."""
+    """Les attributs sont modifiables à chaud (lus à chaque trame, écriture atomique GIL).
+
+    Défauts mesurés sur la bague réelle (turquoise, photos du 2026-11-23) : H ≈ 94–98,
+    S ≈ 195–255, V ≈ 230. H ± serré à 5 car la gaine thermo bleu foncé est à H 102–107
+    (7–10 unités seulement au-dessus) et formerait un blob plus gros que la bague ;
+    S min à 120 élimine le tube translucide (S ≈ 80) et les reflets.
+    """
 
     def __init__(
         self,
-        h_center: float = 60.0,
-        h_width: float = 12.0,
-        s_min: int = 70,
-        v_min: int = 70,
+        h_center: float = 95.0,
+        h_width: float = 5.0,
+        s_min: int = 120,
+        v_min: int = 100,
         min_area: float = 40.0,
     ):
         self.h_center = h_center

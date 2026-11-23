@@ -8,7 +8,7 @@ cv2 = pytest.importorskip("cv2")
 from vna_app.vision.tracker import RingTracker  # noqa: E402
 
 
-def green_bgr(h=60, s=150, v=220):
+def green_bgr(h=95, s=200, v=220):  # turquoise de la bague réelle (défauts du tracker)
     px = np.uint8([[[h, s, v]]])
     return tuple(int(c) for c in cv2.cvtColor(px, cv2.COLOR_HSV2BGR)[0, 0])
 
@@ -54,5 +54,12 @@ def test_min_area_filters_speckle():
 
 def test_desaturated_green_rejected():
     img = blank()
-    cv2.circle(img, (100, 100), 12, green_bgr(s=30), -1)  # vert délavé < s_min
-    assert RingTracker(s_min=70).find(img) is None
+    cv2.circle(img, (100, 100), 12, green_bgr(s=80), -1)  # tube translucide S≈80 < s_min
+    assert RingTracker().find(img) is None
+
+
+def test_dark_blue_sheath_rejected():
+    """La gaine thermo (H≈105) ne doit pas être prise pour la bague (H≈95)."""
+    img = blank()
+    cv2.circle(img, (100, 100), 20, green_bgr(h=105, s=255, v=230), -1)
+    assert RingTracker().find(img) is None

@@ -471,11 +471,12 @@ class MainWindow(QMainWindow):
 
         self.trk_sp = {}
         tform = QFormLayout()
+        # défauts = mesures sur la bague turquoise réelle (voir vision/tracker.py)
         for key, label, lo, hi, val in (
-            ("h_center", "Teinte H centre (vert = 60)", 0, 179, 60),
-            ("h_width", "Teinte H ±", 1, 60, 12),
-            ("s_min", "Saturation min", 0, 255, 70),
-            ("v_min", "Valeur min", 0, 255, 70),
+            ("h_center", "Teinte H centre (turquoise = 95)", 0, 179, 95),
+            ("h_width", "Teinte H ± (gaine bleue à H≈105 !)", 1, 60, 5),
+            ("s_min", "Saturation min", 0, 255, 120),
+            ("v_min", "Valeur min", 0, 255, 100),
             ("min_area", "Aire min (px²)", 1, 100000, 40),
         ):
             sp = QSpinBox()
