@@ -1,0 +1,567 @@
+options:
+  parameters:
+    author: SurTouch
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: ''
+    copyright: ''
+    description: "S11 moins sa moyenne glissante (filtre IIR un p\xF4le par point\
+      \ de fr\xE9quence) : fait ressortir les variations."
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: litevna_04_diff
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: "LiteVNA - diff\xE9rentiel par rapport \xE0 une ligne de base glissante"
+    window_size: (1000,1000)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: alpha
+  id: variable_qtgui_range
+  parameters:
+    comment: ''
+    gui_hint: ''
+    label: '''Alpha de la ligne de base'''
+    min_len: '200'
+    orient: Qt.Horizontal
+    rangeType: float
+    start: '0.005'
+    step: '0.005'
+    stop: '1'
+    value: '0.05'
+    widget: counter_slider
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1237, 16]
+    rotation: 0
+    state: enabled
+- name: f_step
+  id: variable
+  parameters:
+    comment: ''
+    value: (int(f_stop) - int(f_start)) // (points - 1)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1121, 19]
+    rotation: 0
+    state: enabled
+- name: averaging
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Averaging
+    short_id: ''
+    type: intx
+    value: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1000, 19]
+    rotation: 0
+    state: enabled
+- name: baseline
+  id: single_pole_iir_filter_xx
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha: alpha
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: complex
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [416, 284.0]
+    rotation: 0
+    state: enabled
+- name: cal_file
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Fichier .cal (vide = brut)
+    short_id: ''
+    type: str
+    value: '''/home/nveau/vna_app/bench8.cal'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [619, 9]
+    rotation: 0
+    state: enabled
+- name: db_base
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1048, 356.0]
+    rotation: 0
+    state: enabled
+- name: db_diff
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1056, 188.0]
+    rotation: 0
+    state: enabled
+- name: db_s11
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1056, 460.0]
+    rotation: 0
+    state: enabled
+- name: diff
+  id: blocks_sub_xx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_inputs: '2'
+    type: complex
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [656, 192.0]
+    rotation: 0
+    state: enabled
+- name: f_start
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Start (Hz)
+    short_id: ''
+    type: eng_float
+    value: 300e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [204, 9]
+    rotation: 0
+    state: enabled
+- name: f_stop
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Stop (Hz)
+    short_id: ''
+    type: eng_float
+    value: 1.3e9
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [345, 8]
+    rotation: 0
+    state: enabled
+- name: mag2_base
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [664, 372.0]
+    rotation: 0
+    state: enabled
+- name: mag2_diff
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [848, 204.0]
+    rotation: 0
+    state: enabled
+- name: mag2_s11
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [648, 476.0]
+    rotation: 0
+    state: enabled
+- name: null_s21
+  id: blocks_null_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    bus_structure_sink: '[[0,],]'
+    comment: ''
+    num_inputs: '1'
+    type: complex
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [336, 452.0]
+    rotation: 0
+    state: enabled
+- name: points
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Points
+    short_id: ''
+    type: intx
+    value: '501'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [501, 1]
+    rotation: 0
+    state: enabled
+- name: port
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Port (/dev/litevna ou sim)
+    short_id: p
+    type: str
+    value: '''/dev/litevna'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [815, 15]
+    rotation: 0
+    state: enabled
+- name: rep_sink_db_0
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1328, 468.0]
+    rotation: 0
+    state: enabled
+- name: rep_sink_db_1
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1320, 364.0]
+    rotation: 0
+    state: enabled
+- name: rep_sink_diff_0
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1304, 196.0]
+    rotation: 0
+    state: enabled
+- name: sink_db
+  id: qtgui_vector_sink_f
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '1.0'
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: '''S11'''
+    label10: ''
+    label2: '''ligne de base'''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '''S11 et ligne de base'''
+    nconnections: '2'
+    ref_level: '0'
+    showports: 'False'
+    update_time: '0.10'
+    vlen: points
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    x_axis_label: "'Fr\xE9quence (MHz)'"
+    x_start: f_start / 1e6
+    x_step: f_step / 1e6
+    x_units: '""'
+    y_axis_label: '''dB'''
+    y_units: '""'
+    ymax: '10'
+    ymin: '-80'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1680, 404.0]
+    rotation: 0
+    state: enabled
+- name: sink_diff
+  id: qtgui_vector_sink_f
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '1.0'
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: "'diff\xE9rentiel'"
+    label10: ''
+    label2: ''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '''|S11 - ligne de base|'''
+    nconnections: '1'
+    ref_level: '0'
+    showports: 'False'
+    update_time: '0.10'
+    vlen: points
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    x_axis_label: "'Fr\xE9quence (MHz)'"
+    x_start: f_start / 1e6
+    x_step: f_step / 1e6
+    x_units: '""'
+    y_axis_label: '''dB'''
+    y_units: '""'
+    ymax: '0'
+    ymin: '-120'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1616, 140.0]
+    rotation: 0
+    state: enabled
+- name: vna
+  id: litevna_sweep_source
+  parameters:
+    affinity: ''
+    alias: ''
+    averaging: averaging
+    cal_file: cal_file
+    comment: ''
+    f_start: f_start
+    f_stop: f_stop
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    points: points
+    port: port
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [-8, 268.0]
+    rotation: 0
+    state: enabled
+
+connections:
+- [baseline, '0', diff, '1']
+- [baseline, '0', mag2_base, '0']
+- [db_base, '0', rep_sink_db_1, '0']
+- [db_diff, '0', rep_sink_diff_0, '0']
+- [db_s11, '0', rep_sink_db_0, '0']
+- [diff, '0', mag2_diff, '0']
+- [mag2_base, '0', db_base, '0']
+- [mag2_diff, '0', db_diff, '0']
+- [mag2_s11, '0', db_s11, '0']
+- [rep_sink_db_0, '0', sink_db, '0']
+- [rep_sink_db_1, '0', sink_db, '1']
+- [rep_sink_diff_0, '0', sink_diff, '0']
+- [vna, '0', baseline, '0']
+- [vna, '0', diff, '0']
+- [vna, '0', mag2_s11, '0']
+- [vna, '1', null_s21, '0']
+
+metadata:
+  file_format: 1

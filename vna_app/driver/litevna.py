@@ -34,6 +34,9 @@ REG_SWEEP_STEP = 0x10
 REG_SWEEP_POINTS = 0x20
 REG_VALUES_PER_FREQ = 0x22
 REG_FIFO = 0x30
+REG_SI5351_POWER = 0x41  # puissance source < ~140 MHz
+REG_ADF4350_POWER = 0x42  # puissance source > ~140 MHz
+POWER_MAX = 3  # niveaux 0 (min) .. 3 (max, défaut ADF4350)
 REG_DEVICE_VARIANT = 0xF0
 REG_PROTOCOL_VERSION = 0xF1
 REG_HW_REVISION = 0xF2
@@ -255,6 +258,26 @@ class LiteVNA:
         if self.variant != VARIANT_SAA2:
             raise LiteVNAError(f"deviceVariant=0x{self.variant:02x}, attendu 0x02 (SAA2/LiteVNA)")
 
+    def set_power(self, adf4350: Optional[int] = None, si5351: Optional[int] = None) -> None:
+        """Puissance de la source : `adf4350` (> ~140 MHz, défaut matériel 3), `si5351`
+        (< ~140 MHz, défaut matériel 1). Niveaux 0 (min) à 3 (max). Relit les registres."""
+        self._check_not_streaming()
+        for reg, lvl in ((REG_ADF4350_POWER, adf4350), (REG_SI5351_POWER, si5351)):
+            if lvl is None:
+                continue
+            if not 0 <= int(lvl) <= POWER_MAX:
+                raise ValueError(f"puissance dans 0..{POWER_MAX}")
+            self._port()
+            self.write_reg(reg, int(lvl), 1)
+            got = self.read_reg(reg, 1)
+            if got != int(lvl):
+                raise LiteVNAError(f"puissance refusée (reg 0x{reg:02x}) : {got} (voulu {lvl})")
+
+    def get_power(self) -> Tuple[int, int]:
+        """(adf4350, si5351) lus dans l'appareil."""
+        self._port()
+        return self.read_reg(REG_ADF4350_POWER, 1), self.read_reg(REG_SI5351_POWER, 1)
+
     def device_info(self) -> dict:
         self._port()
         return {
@@ -336,6 +359,7 @@ class LiteVNA:
         counts = np.zeros(points, dtype=np.int64)
         missing = n_total
         frames: List[Frame] = []
+        kmax = -1  # plus grand index vu depuis le dernier reset
         total = 0
         while missing > 0:
             if total >= cap:
@@ -347,11 +371,21 @@ class LiteVNA:
                 k = fr.freq_index
                 if k >= points:
                     continue
-                if k == 0 and counts[0] >= avg:  # nouveau balayage : jeter le résiduel
-                    frames.clear()
-                    counts[:] = 0
-                    missing = n_total
+                if k == 0 and counts[0] >= avg:
+                    if kmax == 0:
+                        # Résiduel limité au point 0 (< avg entrées, averaging > 1) suivi
+                        # du nouveau balayage : seul index 0 vu jusqu'ici, les `avg` plus
+                        # RÉCENTES entrées sont les bonnes → fenêtre glissante.
+                        frames.pop(0)
+                        counts[0] -= 1
+                        missing += 1
+                    else:  # retour à l'index 0 : nouveau balayage, jeter le résiduel
+                        frames.clear()
+                        counts[:] = 0
+                        missing = n_total
+                        kmax = -1
                 frames.append(fr)
+                kmax = max(kmax, k)
                 if counts[k] < avg:
                     counts[k] += 1
                     missing -= 1

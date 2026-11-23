@@ -1,13 +1,16 @@
-"""CLI d'acquisition sans GUI : `python -m vna_app.cli {info,sweep,calibrate,eps}`."""
+"""CLI d'acquisition sans GUI : `python -m vna_app.cli {info,sweep,record,calibrate,eps}`."""
 
 from __future__ import annotations
 
 import argparse
+import queue
 import sys
+import time
 from pathlib import Path
 
 from vna_app.calibration import Calibration, CalibrationError
 from vna_app.driver.litevna import LiteVNA, LiteVNAError
+from vna_app.driver.sim import open_device
 from vna_app.processing.export import write_s2p
 from vna_app.processing.filters import smooth_complex
 from vna_app.processing.permittivity import (
@@ -16,6 +19,7 @@ from vna_app.processing.permittivity import (
     eps_three_reference,
     to_eps_columns,
 )
+from vna_app.processing.record import RecordError, SweepRecorder
 
 
 def cmd_info(args) -> int:
@@ -36,6 +40,8 @@ def cmd_sweep(args) -> int:
     cal = Calibration.load(args.cal) if args.cal else None
     with LiteVNA(args.port) as vna:
         info = vna.device_info()
+        if args.power is not None:
+            vna.set_power(adf4350=args.power)
         vna.configure_sweep(args.start, args.stop, args.points, args.avg)
         freqs, s_raw = vna.sweep()
         step = vna.step_hz
@@ -56,6 +62,48 @@ def cmd_sweep(args) -> int:
         calibration_file=args.cal,
     )
     print(f"{len(freqs)} points écrits dans {out}")
+    return 0
+
+
+def cmd_record(args) -> int:
+    """Série de sweeps BRUTS horodatés -> .npz (processing/record.py). --port sim accepté."""
+    if args.count is None and args.duration is None:
+        print("erreur: fournir --count et/ou --duration", file=sys.stderr)
+        return 2
+    with open_device(args.port) as vna:
+        info = vna.device_info()
+        vna.configure_sweep(args.start, args.stop, args.points, args.avg)
+        meta = {
+            "start_hz": vna.start_hz,
+            "step_hz": vna.step_hz,
+            "points": vna.points,
+            "averaging": vna.averaging,
+            "firmware": info["firmware"],
+            "hardware_revision": info["hardware_revision"],
+            "port": args.port,
+            "calibrated": False,
+            "note": "données brutes S11/S21 (rev/fwd)",
+        }
+        t_end = None if args.duration is None else time.monotonic() + args.duration
+        with SweepRecorder(args.out, meta) as rec:
+            q = vna.start_streaming(maxsize=64)
+            try:
+                while (args.count is None or len(rec) < args.count) and (
+                    t_end is None or time.monotonic() < t_end
+                ):
+                    try:
+                        item = q.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if isinstance(item, LiteVNAError):
+                        raise item
+                    rec.append(item)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                vna.stop_streaming()
+            n = len(rec)
+    print(f"{n} sweep(s) de {args.points} points écrits dans {args.out}")
     return 0
 
 
@@ -142,11 +190,25 @@ def main(argv=None) -> int:
     sw.add_argument("--stop", type=float, required=True, help="Hz")
     sw.add_argument("--points", type=int, required=True)
     sw.add_argument("--avg", type=int, default=1)
+    sw.add_argument(
+        "--power",
+        type=int,
+        choices=range(4),
+        help="puissance source > 140 MHz : 0 (min)..3 (max, défaut)",
+    )
     sw.add_argument("--out", required=True)
     sw.add_argument("--cal", help="fichier .cal à appliquer (même grille de fréquences)")
     sw.add_argument(
         "--delay-ns", type=float, help="délai simple trajet du câble (ns), prioritaire sur le .cal"
     )
+    rc = sub.add_parser("record", help="série de sweeps bruts horodatés -> .npz")
+    rc.add_argument("--start", type=float, required=True, help="Hz")
+    rc.add_argument("--stop", type=float, required=True, help="Hz (= --start : fréquence fixe)")
+    rc.add_argument("--points", type=int, required=True)
+    rc.add_argument("--avg", type=int, default=1)
+    rc.add_argument("--count", type=int, help="nombre de sweeps")
+    rc.add_argument("--duration", type=float, help="durée maximale (s)")
+    rc.add_argument("--out", required=True, help="fichier .npz")
     cp = sub.add_parser("calibrate", help="sweeps bruts O/S/L(/Thru) -> .cal")
     for k in ("open", "short", "load"):
         cp.add_argument(f"--{k}", required=True, help=f"sweep brut .s2p du standard {k}")
@@ -166,10 +228,14 @@ def main(argv=None) -> int:
     ep.add_argument("--out", required=True, help="fichier .csv")
     args = p.parse_args(argv)
     try:
-        return {"info": cmd_info, "sweep": cmd_sweep, "calibrate": cmd_calibrate, "eps": cmd_eps}[
-            args.cmd
-        ](args)
-    except (LiteVNAError, CalibrationError) as e:
+        return {
+            "info": cmd_info,
+            "sweep": cmd_sweep,
+            "record": cmd_record,
+            "calibrate": cmd_calibrate,
+            "eps": cmd_eps,
+        }[args.cmd](args)
+    except (LiteVNAError, CalibrationError, RecordError) as e:
         print(f"erreur: {e}", file=sys.stderr)
         return 1
     except ValueError as e:

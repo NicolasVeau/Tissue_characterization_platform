@@ -132,6 +132,23 @@ def test_stale_entries_discarded(monkeypatch, stale, avg):
             assert s[k, 0] == pytest.approx(0.01 * (k + 1))
 
 
+@pytest.mark.parametrize("n_stale", [1, 2, 3, 4, 5, 7, 11, 63])
+def test_stale_partial_point_with_averaging(monkeypatch, n_stale):
+    """Résiduel de n ENTRÉES (pas de points entiers) : il peut finir au milieu d'un point."""
+    vna, fake = make(monkeypatch)
+    vna.configure_sweep(400e6, 3e9, 201, 4)
+    orig = fake._restart
+
+    def restart():
+        orig()
+        fake.fifo = [fake._entry(i // 4, True) for i in range(n_stale)] + fake.fifo
+
+    fake._restart = restart
+    _, s = vna.sweep(retries=0)
+    assert (s[:, 0].real > 0).all()  # aucun résiduel (-777) conservé
+    assert s[0, 0] == pytest.approx(0.01)
+
+
 def test_endless_bad_indices_hit_cap_then_error(monkeypatch):
     vna, fake = make(monkeypatch)
     vna.configure_sweep(400e6, 3e9, 11, 1)
@@ -282,3 +299,16 @@ def test_restart_streaming_after_reconfigure(monkeypatch):
     r = _get(q2)
     vna.stop_streaming()
     assert r.seq == 0 and r.s_raw.shape == (11, 2)
+
+
+def test_set_power_roundtrip_on_sim():
+    from vna_app.driver.sim import open_device
+
+    with open_device("sim") as v:
+        assert v.get_power() == (3, 1)
+        v.set_power(adf4350=0)
+        assert v.get_power() == (0, 1)
+        v.set_power(si5351=2)
+        assert v.get_power() == (0, 2)
+        with pytest.raises(ValueError):
+            v.set_power(adf4350=4)

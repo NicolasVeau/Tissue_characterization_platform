@@ -1,0 +1,78 @@
+id: litevna_sweep_source
+label: LiteVNA Sweep Source
+category: '[LiteVNA]'
+flags: [python, throttle]
+
+parameters:
+-   id: port
+    label: Port
+    dtype: string
+    default: /dev/litevna
+-   id: f_start
+    label: Start (Hz)
+    dtype: real
+    default: 400e6
+-   id: f_stop
+    label: Stop (Hz)
+    dtype: real
+    default: 3e9
+-   id: points
+    label: Points
+    dtype: int
+    default: '201'
+-   id: averaging
+    label: Averaging
+    dtype: int
+    default: '1'
+-   id: cal_file
+    label: Calibration (.cal)
+    dtype: file_open
+    default: ''
+    hide: ${ 'none' if len(cal_file) > 0 else 'part' }
+
+inputs:
+-   domain: message
+    id: cmd
+    optional: true
+
+outputs:
+-   label: S11
+    domain: stream
+    dtype: complex
+    vlen: ${ points }
+-   label: S21
+    domain: stream
+    dtype: complex
+    vlen: ${ points }
+-   domain: message
+    id: sweep
+    optional: true
+
+asserts:
+- ${ points >= 2 }
+- ${ averaging >= 1 }
+- ${ f_stop > f_start }
+
+templates:
+    imports: import gr_litevna
+    make: gr_litevna.sweep_source(${port}, ${f_start}, ${f_stop}, ${points}, ${averaging}, ${cal_file})
+    callbacks:
+    - set_f_start(${f_start})
+    - set_f_stop(${f_stop})
+    - set_averaging(${averaging})
+
+documentation: |-
+    Source de sweeps S11/S21 du LiteVNA 64. Un item = un sweep complet (vecteur
+    complexe de longueur Points), au débit de l'appareil (~300 points/s).
+
+    Port : /dev/litevna, ou "sim" pour le simulateur
+    (options : sim:rate=300,noise=1e-3,drift=1e5,seed=1).
+    Calibration : fichier .cal de vna_app (OSL sur S11, Thru sur S21) sur la MÊME
+    grille que le sweep ; vide = données brutes.
+
+    Tags sur S11 à chaque sweep : rx_time, sweep_idx, f_start, f_step, calibrated.
+    Port message "sweep" : PDU (métadonnées, vecteur c32 de 2N valeurs S11 puis S21).
+    Port message "cmd" : dictionnaire {f_start, f_stop, averaging}.
+    Start, Stop et Averaging se changent à chaud ; Points non.
+
+file_format: 1

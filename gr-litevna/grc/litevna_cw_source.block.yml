@@ -1,0 +1,59 @@
+id: litevna_cw_source
+label: LiteVNA CW Source
+category: '[LiteVNA]'
+flags: [python, throttle]
+
+parameters:
+-   id: port
+    label: Port
+    dtype: string
+    default: /dev/litevna
+-   id: freq
+    label: Frequency (Hz)
+    dtype: real
+    default: 1e9
+-   id: block_len
+    label: Samples per acquisition
+    dtype: int
+    default: '256'
+-   id: averaging
+    label: Averaging
+    dtype: int
+    default: '1'
+
+inputs:
+-   domain: message
+    id: cmd
+    optional: true
+
+outputs:
+-   label: S11
+    domain: stream
+    dtype: complex
+-   label: S21
+    domain: stream
+    dtype: complex
+
+asserts:
+- ${ block_len >= 1 }
+- ${ averaging >= 1 }
+
+templates:
+    imports: import gr_litevna
+    make: gr_litevna.cw_source(${port}, ${freq}, ${block_len}, ${averaging})
+    callbacks:
+    - set_freq(${freq})
+    - set_averaging(${averaging})
+
+documentation: |-
+    S11/S21 à fréquence fixe (start = stop, pas nul) : flux scalaires complexes
+    BRUTS à la cadence de l'appareil (~300 échantillons/s, divisée par Averaging).
+
+    L'échantillonnage est régulier dans une acquisition de "Samples per
+    acquisition" échantillons ; un court trou sépare deux acquisitions.
+    Tags sur S11 au début de chaque acquisition : rx_time (fin d'acquisition),
+    sweep_idx, freq. Port message "cmd" : dictionnaire {freq, averaging}.
+
+    À valider sur l'appareil : acceptation d'un pas de fréquence nul par le firmware.
+
+file_format: 1

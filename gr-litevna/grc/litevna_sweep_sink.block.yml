@@ -1,0 +1,46 @@
+id: litevna_sweep_sink
+label: LiteVNA Sweep Sink
+category: '[LiteVNA]'
+flags: [python]
+
+parameters:
+-   id: filename
+    label: File (.npz)
+    dtype: file_save
+    default: sweeps.npz
+-   id: points
+    label: Points
+    dtype: int
+    default: '201'
+-   id: f_start
+    label: Start (Hz), if untagged
+    dtype: real
+    default: 400e6
+    hide: part
+-   id: f_step
+    label: Step (Hz), if untagged
+    dtype: real
+    default: 13e6
+    hide: part
+
+inputs:
+-   label: S11
+    domain: stream
+    dtype: complex
+    vlen: ${ points }
+-   label: S21
+    domain: stream
+    dtype: complex
+    vlen: ${ points }
+
+templates:
+    imports: import gr_litevna
+    make: gr_litevna.sweep_sink(${filename}, ${points}, ${f_start}, ${f_step})
+
+documentation: |-
+    Enregistre un flux de sweeps S11/S21 dans un fichier .npz relisible par
+    LiteVNA Replay Source. Reprend les tags rx_time, sweep_idx, f_start, f_step
+    et calibrated des blocs source ; Start/Step ne servent que si le flux n'est
+    pas tagué. Le fichier est écrit à l'arrêt du flowgraph, en complex64.
+
+file_format: 1

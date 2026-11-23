@@ -1,0 +1,411 @@
+options:
+  parameters:
+    author: SurTouch
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: ''
+    copyright: ''
+    description: Chaque ligne du raster est un sweep de |S11| (dB) ; la courbe du
+      bas est le dernier sweep.
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: litevna_02_waterfall
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: "LiteVNA - \xE9volution de |S11| dans le temps"
+    window_size: (1000,1000)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: f_step
+  id: variable
+  parameters:
+    comment: ''
+    value: (int(f_stop) - int(f_start)) // (points - 1)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [981, 110]
+    rotation: 0
+    state: enabled
+- name: rows
+  id: variable
+  parameters:
+    comment: ''
+    value: '120'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1083, 113]
+    rotation: 0
+    state: enabled
+- name: averaging
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Averaging
+    short_id: ''
+    type: intx
+    value: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [635, 117]
+    rotation: 0
+    state: enabled
+- name: cal_file
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Fichier .cal (vide = brut)
+    short_id: ''
+    type: str
+    value: '''/home/nveau/vna_app/bench8.cal'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [789, 111]
+    rotation: 0
+    state: enabled
+- name: db_s11
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [580, 230]
+    rotation: 0
+    state: enabled
+- name: f_start
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Start (Hz)
+    short_id: ''
+    type: eng_float
+    value: 300e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [205, 121]
+    rotation: 0
+    state: enabled
+- name: f_stop
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Stop (Hz)
+    short_id: ''
+    type: eng_float
+    value: 1.3e9
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [357, 123]
+    rotation: 0
+    state: enabled
+- name: mag2_s11
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [339, 246]
+    rotation: 0
+    state: enabled
+- name: null_s21
+  id: blocks_null_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    bus_structure_sink: '[[0,],]'
+    comment: ''
+    num_inputs: '1'
+    type: complex
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [339, 329]
+    rotation: 0
+    state: enabled
+- name: points
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Points
+    short_id: ''
+    type: intx
+    value: '501'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [512, 116]
+    rotation: 0
+    state: enabled
+- name: port
+  id: parameter
+  parameters:
+    alias: ''
+    comment: ''
+    hide: none
+    label: Port (/dev/litevna ou sim)
+    short_id: p
+    type: str
+    value: '''/dev/litevna'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 124]
+    rotation: 0
+    state: enabled
+- name: raster
+  id: qtgui_time_raster_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    axislabels: 'True'
+    color1: '0'
+    color10: '0'
+    color2: '0'
+    color3: '0'
+    color4: '0'
+    color5: '0'
+    color6: '0'
+    color7: '0'
+    color8: '0'
+    color9: '0'
+    comment: ''
+    grid: 'False'
+    gui_hint: ''
+    label1: ''
+    label10: ''
+    label2: ''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    mult: '[]'
+    name: '''|S11| (dB), un sweep par ligne'''
+    ncols: points
+    nconnections: '1'
+    nrows: rows
+    offset: '[]'
+    samp_rate: points
+    type: float
+    update_time: '0.10'
+    zmax: '0'
+    zmin: '-20'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1085, 223]
+    rotation: 0
+    state: enabled
+- name: rep_sink_db_0
+  id: blocks_repeat
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    interp: '2'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: float
+    vlen: points
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [794, 447]
+    rotation: 0
+    state: enabled
+- name: sink_db
+  id: qtgui_vector_sink_f
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '1.0'
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: '''S11'''
+    label10: ''
+    label2: ''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '''Dernier sweep'''
+    nconnections: '1'
+    ref_level: '0'
+    showports: 'False'
+    update_time: '0.10'
+    vlen: points
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    x_axis_label: "'Fr\xE9quence (MHz)'"
+    x_start: f_start / 1e6
+    x_step: f_step / 1e6
+    x_units: '""'
+    y_axis_label: '''dB'''
+    y_units: '""'
+    ymax: '10'
+    ymin: '-80'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1071, 390]
+    rotation: 0
+    state: enabled
+- name: to_stream
+  id: blocks_vector_to_stream
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_items: points
+    type: float
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [825, 251]
+    rotation: 0
+    state: enabled
+- name: vna
+  id: litevna_sweep_source
+  parameters:
+    affinity: ''
+    alias: ''
+    averaging: averaging
+    cal_file: cal_file
+    comment: ''
+    f_start: f_start
+    f_stop: f_stop
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    points: points
+    port: port
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 240]
+    rotation: 0
+    state: enabled
+
+connections:
+- [db_s11, '0', rep_sink_db_0, '0']
+- [db_s11, '0', to_stream, '0']
+- [mag2_s11, '0', db_s11, '0']
+- [rep_sink_db_0, '0', sink_db, '0']
+- [to_stream, '0', raster, '0']
+- [vna, '0', mag2_s11, '0']
+- [vna, '1', null_s21, '0']
+
+metadata:
+  file_format: 1

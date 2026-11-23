@@ -1,3 +1,4 @@
+
 # Protocole USB LiteVNA 64 (binaire NanoVNA V2 / SAA2)
 
 Source de vérité : annexe « USB data interface » du manuel LiteVNA (firmware

@@ -1,0 +1,61 @@
+id: litevna_replay_source
+label: LiteVNA Replay Source
+category: '[LiteVNA]'
+flags: [python, throttle]
+
+parameters:
+-   id: filename
+    label: Recording (.npz)
+    dtype: file_open
+    default: ''
+-   id: points
+    label: Points
+    dtype: int
+    default: '201'
+-   id: cal_file
+    label: Calibration (.cal)
+    dtype: file_open
+    default: ''
+    hide: ${ 'none' if len(cal_file) > 0 else 'part' }
+-   id: repeat
+    label: Repeat
+    dtype: bool
+    default: 'False'
+-   id: realtime
+    label: Real time
+    dtype: bool
+    default: 'True'
+-   id: speed
+    label: Speed
+    dtype: real
+    default: '1.0'
+    hide: ${ 'none' if realtime else 'part' }
+
+outputs:
+-   label: S11
+    domain: stream
+    dtype: complex
+    vlen: ${ points }
+-   label: S21
+    domain: stream
+    dtype: complex
+    vlen: ${ points }
+-   domain: message
+    id: sweep
+    optional: true
+
+templates:
+    imports: import gr_litevna
+    make: gr_litevna.replay_source(${filename}, ${points}, ${cal_file}, ${repeat}, ${realtime}, ${speed})
+    callbacks:
+    - set_speed(${speed})
+
+documentation: |-
+    Rejoue un enregistrement de sweeps (.npz de `python -m vna_app.cli record` ou
+    de LiteVNA Sweep Sink) avec les mêmes sorties, tags et PDU que LiteVNA Sweep
+    Source. Points doit être égal au nombre de points de l'enregistrement.
+
+    Real time : respecte les intervalles enregistrés, divisés par Speed.
+    Calibration : .cal appliqué à la relecture d'un enregistrement brut.
+
+file_format: 1
