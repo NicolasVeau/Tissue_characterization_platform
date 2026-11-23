@@ -188,8 +188,24 @@ def test_waterfalls_follow_sweeps(win):
     np.testing.assert_allclose(x + 1j * y, win.result.s[:, 0])
 
 
+def test_hidden_waterfall_defers_render_but_keeps_levels(win):
+    """Page ε* non affichée : pas d'isocontours construits, mais données et niveaux à jour."""
+    _eps_setup(win)
+    win.on_tab_changed(0)
+    for k in range(6):
+        feed(win, one(0.2 + 0.05 * k))
+    wf = win.wf_iso
+    assert len(wf.rows) == 6 and wf.levels[1] > wf.levels[0]
+    assert wf._dirty and not wf._iso
+    win.on_tab_changed(win.eps_tab_index)
+    win.show()
+    QApplication.processEvents()
+    assert not wf._dirty and len(wf._iso) == 6  # rendu rattrapé à l'affichage
+
+
 def test_iso_waterfall_contours(win):
     _eps_setup(win)
+    win.on_tab_changed(win.eps_tab_index)
     for k in range(6):
         feed(win, one(0.2 + 0.05 * k))
     wf = win.wf_iso
@@ -417,3 +433,104 @@ def test_power_controls_defaults_and_signal(win):
     win.pwr_low.setCurrentIndex(0)
     assert sent[-1] == (1, 0)
     win.connected = False
+
+
+def test_worker_backpressure(monkeypatch):
+    """Sans ack du thread Qt, le worker n'empile pas plus de MAX_INFLIGHT sweeps."""
+    import time
+
+    from vna_app.gui.worker import Worker
+
+    app = QApplication.instance() or QApplication([])
+
+    class StubVNA:
+        def sweep(self):
+            return F, sraw(one(0.2))
+
+        def close(self):
+            pass
+
+    w = Worker("/dev/inexistant")
+    w._vna = StubVNA()
+    w._params = dict(PARAMS)
+    got = []
+    w.sweep_done.connect(lambda *a: got.append(a))
+
+    def spin(sec):
+        t = time.monotonic() + sec
+        while time.monotonic() < t:
+            app.processEvents()
+            time.sleep(0.005)
+
+    w.run(True)
+    spin(0.3)
+    assert len(got) == w.MAX_INFLIGHT  # bloqué : l'affichage n'a rien acquitté
+    w.ack()
+    spin(0.3)
+    assert len(got) == w.MAX_INFLIGHT + 1  # un acquittement = un sweep de plus
+    w.stop()
+    w.ack()
+    w.ack()
+    spin(0.2)
+    assert len(got) == w.MAX_INFLIGHT + 1  # stop effectif : plus rien n'est émis
+
+
+# -- cartographie caméra (onglet Carto) ----------------------------------------------
+
+
+def _cal_and_eps(win, monkeypatch):
+    for name, g in (("open", 1), ("short", -1), ("load", 0)):
+        win.pending = name
+        feed(win, one(g))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: ("", ""))
+    win.build_cal()
+    win.eps_mode.setCurrentIndex(1)  # capacitif
+
+
+def test_map_point_added_on_contact(win, monkeypatch):
+    import time as _time
+
+    _cal_and_eps(win, monkeypatch)
+    t = _time.monotonic()
+    win.scan_positions.push(t, 100.0, 50.0)
+    win.tip_dx.setValue(3)
+    win.tip_dy.setValue(-5)
+    win.on_sweep(F, sraw(probe(one(40 - 10j))), dict(PARAMS, t_mono=t))
+    assert len(win.scan_map) == 1
+    _, x, y, e1, e2 = win.scan_map.arrays()
+    assert x[0] == 103.0 and y[0] == 45.0
+    np.testing.assert_allclose(e1[0], 40.0, rtol=1e-6)
+    np.testing.assert_allclose(e2[0], 10.0, rtol=1e-6)
+    assert "contact" in win.map_live.text()
+    assert len(win.scan_view.path.getData()[0]) == 1  # point affiché
+
+
+def test_map_requires_contact_and_fresh_position(win, monkeypatch):
+    import time as _time
+
+    _cal_and_eps(win, monkeypatch)
+    t = _time.monotonic()
+    # contact mais aucune position caméra : pas de point inventé
+    win.on_sweep(F, sraw(probe(one(40 - 10j))), dict(PARAMS, t_mono=t))
+    assert len(win.scan_map) == 0
+    # position fraîche mais pas de contact (air, ε ≈ 1)
+    win.scan_positions.push(t, 10.0, 10.0)
+    win.on_sweep(F, sraw(probe(one(1 + 0j))), dict(PARAMS, t_mono=t))
+    assert len(win.scan_map) == 0
+    assert "pas de contact" in win.map_live.text()
+
+
+def test_map_tab_switch_export_and_clear(win, tmp_path, monkeypatch):
+    win.on_tab_changed(win.map_tab_index)
+    assert win.stack.currentIndex() == 3
+    assert not win.smith.isVisibleTo(win)  # toute la largeur pour l'image
+    win.on_tab_changed(0)
+    assert win.smith.isVisibleTo(win)
+    win.scan_map.add(1.0, 1.0, 2.0, 3.0, 4.0)
+    out = tmp_path / "c.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    win.export_map()
+    d = np.loadtxt(out, delimiter=",", skiprows=1)
+    np.testing.assert_allclose(d, [1.0, 1.0, 2.0, 3.0, 4.0])
+    win.clear_map()
+    assert len(win.scan_map) == 0

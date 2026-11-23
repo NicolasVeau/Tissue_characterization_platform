@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
 from vna_app.driver.litevna import LiteVNA, LiteVNAError
@@ -19,6 +22,13 @@ class Worker(QObject):
         self._vna = None
         self._params = None
         self._running = False
+        # Contre-pression : sweeps émis mais pas encore affichés par le thread Qt. Au-delà de
+        # MAX_INFLIGHT on suspend l'acquisition, sinon les sweep_done s'empilent dans la file
+        # d'événements Qt et stop / changement d'affichage / fermeture attendent tout le retard.
+        self._inflight = 0
+        self._lock = threading.Lock()
+
+    MAX_INFLIGHT = 2
 
     @pyqtSlot()
     def connect_device(self):
@@ -73,9 +83,17 @@ class Worker(QObject):
             self.error.emit("appareil non connecté ou non configuré")
             return
         self._running = continuous
+        with self._lock:
+            self._inflight = 0
         self._step()
 
+    def ack(self):
+        """Appelable depuis le thread Qt : un sweep émis a été traité (affiché)."""
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+
     def _step(self):
+        t0 = time.monotonic()
         try:
             freqs, s = self._vna.sweep()
         except LiteVNAError as e:
@@ -84,9 +102,21 @@ class Worker(QObject):
             if self._vna is not None:
                 self.disconnect_device()
             return
-        self.sweep_done.emit(freqs, s, dict(self._params))
+        with self._lock:
+            self._inflight += 1
+        params = dict(self._params)
+        params["t_mono"] = 0.5 * (t0 + time.monotonic())  # milieu du sweep (fusion caméra)
+        self.sweep_done.emit(freqs, s, params)
         if self._running:
-            QTimer.singleShot(0, self._step)  # laisse passer les slots (stop, disconnect)
+            QTimer.singleShot(0, self._next)  # laisse passer les slots (stop, disconnect)
+
+    def _next(self):
+        if not self._running or self._vna is None:
+            return
+        if self._inflight >= self.MAX_INFLIGHT:  # l'affichage est en retard : on attend
+            QTimer.singleShot(10, self._next)
+            return
+        self._step()
 
     def stop(self):
         """Appelable depuis le thread Qt : simple drapeau."""

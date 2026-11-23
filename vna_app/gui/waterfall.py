@@ -40,6 +40,7 @@ class Waterfall(pg.PlotWidget):
         self.auto = True
         self.manual: Tuple[float, float] = (0.0, 1.0)
         self.levels: Tuple[float, float] = (0.0, 1.0)  # niveaux effectivement appliqués
+        self._dirty = False  # rendu image/isocontours différé tant que le widget est masqué
         self.setLabel("bottom", "Fréquence", units="Hz")
         self.setLabel("left", "n° de sweep")
         self.img = pg.ImageItem(axisOrder="col-major")
@@ -120,6 +121,13 @@ class Waterfall(pg.PlotWidget):
             self.manual = (float(lo), float(hi))
             self._render()
 
+    def set_scale(self, lo: float, hi: float, auto: bool):
+        """Échelle manuelle + mode auto en UN seul rendu (évite 2 rendus complets par sweep)."""
+        if hi > lo:
+            self.manual = (float(lo), float(hi))
+        self.auto = bool(auto)
+        self._render()
+
     def _compute_levels(self, arr):
         if not self.auto:
             return self.manual
@@ -136,7 +144,11 @@ class Waterfall(pg.PlotWidget):
             self.img.clear()
             return
         arr = np.array(self.rows)  # (n, N)
-        lo, hi = self.levels = self._compute_levels(arr)
+        lo, hi = self.levels = self._compute_levels(arr)  # peu coûteux : toujours à jour
+        if not self.isVisibleTo(self.window()):
+            self._dirty = True  # image + isocontours (coûteux) seulement quand visible
+            return
+        self._dirty = False
         shown = np.where(np.isfinite(arr), arr, lo)  # non fini -> bas de l'échelle
         self.img.setImage(shown.T, autoLevels=False)  # col-major : (N freqs, n sweeps)
         self.bar.setLevels((lo, hi))
@@ -174,3 +186,8 @@ class Waterfall(pg.PlotWidget):
         n = len(self.rows)
         self._iso_txt.setPos(float(self.freqs[0]), self.first_seq + n)  # coin haut-gauche
         self._iso_txt.setVisible(True)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if self._dirty:
+            self._render()

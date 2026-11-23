@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -29,6 +30,7 @@ from PyQt5.QtWidgets import (
 )
 
 from vna_app.calibration import CalibrationError
+from vna_app.gui.scanview import ScanView
 from vna_app.gui.smith import SmithChart
 from vna_app.gui.waterfall import Waterfall
 from vna_app.gui.worker import Worker
@@ -47,6 +49,7 @@ from vna_app.processing.permittivity import REFERENCE_LIQUIDS, to_eps_columns
 from vna_app.processing.pipeline import Pipeline
 from vna_app.processing.pressure import contact_level, normalize_shape, passes_contact
 from vna_app.processing.sweepfilter import SweepFilter
+from vna_app.vision.fusion import PositionBuffer, ScanMap, summarize_eps
 
 EPS_MODES = [("off", "Désactivé"), ("capacitive", "Capacitif (C0)"), ("three_ref", "3 références")]
 CAL_LABELS = {"open": "Open", "short": "Short", "load": "Load", "thru": "Thru (S21)"}
@@ -107,6 +110,7 @@ class MainWindow(QMainWindow):
         self.eps_tab_index = tabs.addTab(self._build_eps_tab(), "ε*")
         self.cmp_tab_index = tabs.addTab(self._build_cmp_tab(), "Comp.")
         self.cls_tab_index = tabs.addTab(self._build_cls_tab(), "Zone")
+        self.map_tab_index = tabs.addTab(self._build_map_tab(), "Carto")
         tabs.setFixedWidth(310)
         self.status = QLabel("Déconnecté")
         self.status.setWordWrap(True)
@@ -174,6 +178,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(live)  # 0 : acquisition / calibration
         self.stack.addWidget(self._build_cmp_plots())  # 1 : comparaison
         self.stack.addWidget(eps_page)  # 2 : ε*
+        self.stack.addWidget(self._build_map_page())  # 3 : cartographie caméra
         root.addWidget(self.stack, 3)
         tabs.currentChanged.connect(self.on_tab_changed)
         root.addWidget(self.smith, 2)
@@ -430,6 +435,279 @@ class MainWindow(QMainWindow):
         w = QWidget()
         w.setLayout(lay)
         return w
+
+    # -- cartographie caméra (RealSense RGB + bague verte + ε* au contact)
+    def _build_map_tab(self):
+        self.cam_stream = None  # vision.camera.CameraStream ou None
+        self.cam_tracker = None  # vision.tracker.RingTracker pendant la capture
+        self.scan_positions = PositionBuffer()
+        self.scan_map = ScanMap()
+        self.trend = deque(maxlen=1000)  # (t, ε', ε'') par sweep
+        self.cam_timer = QTimer(self)
+        self.cam_timer.setInterval(66)  # ~15 Hz d'affichage ; la capture tourne à 30
+        self.cam_timer.timeout.connect(self.poll_camera)
+
+        self.cam_device = QComboBox()
+        self.cam_device.setEditable(True)
+        self.cam_device.addItem("/dev/video4")  # nœud UVC couleur de la RealSense D4xx
+        self.btn_cam = QPushButton("Démarrer la caméra")
+        self.btn_cam.setCheckable(True)
+        self.btn_cam.toggled.connect(self.toggle_camera)
+        self.chk_cam_auto = QCheckBox("Expo / WB auto")
+        self.chk_cam_auto.setToolTip(
+            "Déconseillé : en auto la teinte dérive et le seuil HSV de la bague décroche."
+        )
+        self.cam_expo = QSpinBox()
+        self.cam_expo.setRange(1, 5000)
+        self.cam_expo.setValue(156)
+        self.cam_expo.setToolTip("Exposition V4L2 (unités de 100 µs)")
+        self.cam_wb = QSpinBox()
+        self.cam_wb.setRange(2000, 8000)
+        self.cam_wb.setSingleStep(100)
+        self.cam_wb.setValue(4600)
+        self.cam_wb.setSuffix(" K")
+        for w in (self.chk_cam_auto, self.cam_expo, self.cam_wb):
+            (w.toggled if w is self.chk_cam_auto else w.valueChanged).connect(self.on_cam_controls)
+
+        self.trk_sp = {}
+        tform = QFormLayout()
+        for key, label, lo, hi, val in (
+            ("h_center", "Teinte H centre (vert = 60)", 0, 179, 60),
+            ("h_width", "Teinte H ±", 1, 60, 12),
+            ("s_min", "Saturation min", 0, 255, 70),
+            ("v_min", "Valeur min", 0, 255, 70),
+            ("min_area", "Aire min (px²)", 1, 100000, 40),
+        ):
+            sp = QSpinBox()
+            sp.setRange(lo, hi)
+            sp.setValue(val)
+            sp.valueChanged.connect(self.on_tracker_params)
+            self.trk_sp[key] = sp
+            tform.addRow(label, sp)
+        self.tip_dx = QSpinBox()
+        self.tip_dy = QSpinBox()
+        for sp in (self.tip_dx, self.tip_dy):
+            sp.setRange(-400, 400)
+        self.tip_dx.setToolTip("Décalage bague → extrémité de la canule, en pixels image")
+        tform.addRow("Décalage pointe dx / dy (px)", self._pair(self.tip_dx, self.tip_dy))
+
+        self.map_flo = QDoubleSpinBox()
+        self.map_fhi = QDoubleSpinBox()
+        for sp, v in ((self.map_flo, 500.0), (self.map_fhi, 2500.0)):
+            sp.setRange(0.05, 6300)
+            sp.setDecimals(1)
+            sp.setValue(v)
+            sp.setSuffix(" MHz")
+        self.map_contact = QDoubleSpinBox()
+        self.map_contact.setRange(0.0, 1000.0)
+        self.map_contact.setDecimals(2)
+        self.map_contact.setSingleStep(0.5)
+        self.map_contact.setValue(2.0)
+        self.map_contact.setToolTip(
+            "Contact détecté par le signal VNA : médiane |ε*−1| ≥ seuil. "
+            "Seuls les sweeps en contact sont cartographiés."
+        )
+        self.map_pt = QSpinBox()
+        self.map_pt.setRange(2, 40)
+        self.map_pt.setValue(9)
+        mform = QFormLayout()
+        mform.addRow("Bande résumé ε*", self._pair(self.map_flo, self.map_fhi))
+        mform.addRow("Contact min |ε*−1|", self.map_contact)
+        mform.addRow("Taille des points (px)", self.map_pt)
+
+        self.btn_map_clear = QPushButton("Effacer le chemin")
+        self.btn_map_clear.clicked.connect(self.clear_map)
+        self.btn_map_csv = QPushButton("Exporter le chemin (.csv)…")
+        self.btn_map_csv.clicked.connect(self.export_map)
+        self.cam_status = QLabel("Caméra arrêtée")
+        self.cam_status.setWordWrap(True)
+
+        lay = QVBoxLayout()
+        lay.addWidget(QLabel("Caméra (RGB UVC de la RealSense) :"))
+        lay.addWidget(self.cam_device)
+        lay.addWidget(self.btn_cam)
+        lay.addWidget(self.chk_cam_auto)
+        eform = QFormLayout()
+        eform.addRow("Exposition", self.cam_expo)
+        eform.addRow("Balance des blancs", self.cam_wb)
+        lay.addLayout(eform)
+        lay.addWidget(QLabel("Bague vert clair (HSV) :"))
+        lay.addLayout(tform)
+        lay.addWidget(QLabel("Cartographie (ε* du sweep en contact) :"))
+        lay.addLayout(mform)
+        lay.addWidget(self.btn_map_clear)
+        lay.addWidget(self.btn_map_csv)
+        lay.addWidget(self.cam_status)
+        lay.addStretch(1)
+        w = QWidget()
+        w.setLayout(lay)
+        return w
+
+    def _build_map_page(self):
+        self.scan_view = ScanView()
+        self.map_pt.valueChanged.connect(self.scan_view.set_point_size)
+        self.map_live = QLabel("ε' : —   ε'' : —")
+        self.map_live.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.map_live.setWordWrap(True)
+        self.trend_plot = pg.PlotWidget(title="ε', ε'' médians (bande résumé)")
+        self.trend_plot.setLabel("bottom", "t", units="s")
+        self.trend_plot.showGrid(x=True, y=True)
+        self.trend_plot.addLegend()
+        self.trend1 = self.trend_plot.plot(pen=pg.mkPen("g", width=2), name="ε'")
+        self.trend2 = self.trend_plot.plot(pen=pg.mkPen("m", width=2), name="ε''")
+        self.trend_plot.setMaximumHeight(220)  # le bandeau ε* reste bas : l'image prend le reste
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.map_live)
+        bottom.addWidget(self.trend_plot, 1)
+        lay = QVBoxLayout()
+        lay.addWidget(self.scan_view, 1)  # image maximisée en haut
+        lay.addLayout(bottom)  # ε', ε'' (valeurs + tendance) en dessous
+        w = QWidget()
+        w.setLayout(lay)
+        return w
+
+    def toggle_camera(self, on):
+        if not on:
+            self.cam_timer.stop()
+            if self.cam_stream is not None:
+                self.cam_stream.stop()
+                self.cam_stream = None
+            self.cam_tracker = None
+            self.btn_cam.setText("Démarrer la caméra")
+            if "échouée" not in self.cam_status.text():
+                self.cam_status.setText("Caméra arrêtée")
+            return
+        try:  # import paresseux : la GUI reste utilisable sans OpenCV
+            from vna_app.vision.camera import CameraError, CameraStream
+            from vna_app.vision.tracker import RingTracker
+        except ImportError as e:
+            self._cam_fail(f"OpenCV indisponible : {e}")
+            return
+        self.cam_tracker = RingTracker()
+        self.on_tracker_params()
+        stream = CameraStream(
+            self.cam_tracker, self.scan_positions, device=self.cam_device.currentText().strip()
+        )
+        try:
+            stream.open()
+        except CameraError as e:
+            self.cam_tracker = None
+            self._cam_fail(str(e))
+            return
+        stream.set_controls(
+            self.chk_cam_auto.isChecked(), self.cam_expo.value(), self.cam_wb.value()
+        )
+        stream.start()
+        self.cam_stream = stream
+        self.btn_cam.setText("Arrêter la caméra")
+        self.cam_status.setText(f"Caméra : {stream.device} ({stream.width}×{stream.height})")
+        self.cam_timer.start()
+
+    def _cam_fail(self, msg):
+        self.btn_cam.blockSignals(True)
+        self.btn_cam.setChecked(False)
+        self.btn_cam.blockSignals(False)
+        self.btn_cam.setText("Démarrer la caméra")
+        self.cam_status.setText(f"Caméra : {msg}")
+        QMessageBox.warning(self, "Caméra", msg)
+
+    def poll_camera(self):
+        s = self.cam_stream
+        if s is None:
+            return
+        if s.error:
+            err = s.error
+            self.btn_cam.setChecked(False)  # déclenche toggle_camera(False)
+            self.cam_status.setText(f"Caméra : {err}")
+            return
+        latest = s.latest()
+        if latest is None:
+            return
+        _, rgb, tip = latest
+        self.scan_view.set_frame(rgb)
+        self.scan_view.set_tip(tip)
+
+    def on_tracker_params(self, *_):
+        trk = self.cam_tracker
+        if trk is None:
+            return
+        trk.h_center = float(self.trk_sp["h_center"].value())
+        trk.h_width = float(self.trk_sp["h_width"].value())
+        trk.s_min = self.trk_sp["s_min"].value()
+        trk.v_min = self.trk_sp["v_min"].value()
+        trk.min_area = float(self.trk_sp["min_area"].value())
+
+    def on_cam_controls(self, *_):
+        auto = self.chk_cam_auto.isChecked()
+        self.cam_expo.setEnabled(not auto)
+        self.cam_wb.setEnabled(not auto)
+        if self.cam_stream is not None:
+            self.cam_stream.set_controls(auto, self.cam_expo.value(), self.cam_wb.value())
+
+    def map_on_sweep(self, freqs, params):
+        """Fusion : la mesure ε* du sweep reçoit la position de la pointe à son instant."""
+        r = self.result
+        if r is None or r.eps is None:
+            return
+        e1, e2 = summarize_eps(
+            freqs, r.eps, self.map_flo.value() * 1e6, self.map_fhi.value() * 1e6
+        )
+        if not np.isfinite(e1):
+            return
+        t = params.get("t_mono", time.monotonic())
+        lvl = contact_level(r.eps)
+        contact = bool(np.isfinite(lvl) and lvl >= self.map_contact.value())
+        self.map_live.setText(
+            f"ε' = {e1:.2f}   ε'' = {e2:.2f}\n"
+            f"|ε*−1| = {lvl:.2f} — {'contact' if contact else 'pas de contact'}"
+            f"   ({len(self.scan_map)} pts)"
+        )
+        self.trend.append((t, e1, e2))
+        ts = np.array([p[0] for p in self.trend])
+        self.trend1.setData(ts - ts[0], [p[1] for p in self.trend])
+        self.trend2.setData(ts - ts[0], [p[2] for p in self.trend])
+        if not contact:
+            return
+        pos = self.scan_positions.at(t)
+        if pos is None:  # pas de position caméra contemporaine : pas de point inventé
+            return
+        self.scan_map.add(t, pos[0] + self.tip_dx.value(), pos[1] + self.tip_dy.value(), e1, e2)
+        self.update_map_path()
+
+    def update_map_path(self):
+        _, x, y, e1, _ = self.scan_map.arrays()
+        if x.size == 0:
+            self.scan_view.clear_path()
+            return
+        if e1.size >= 10:
+            lo, hi = np.percentile(e1, [5, 95])
+        else:
+            lo, hi = float(e1.min()), float(e1.max())
+        if hi <= lo:
+            hi = lo + 1e-6 + abs(lo) * 1e-6
+        self.scan_view.set_path(x, y, e1, float(lo), float(hi))
+
+    def clear_map(self):
+        self.scan_map.clear()
+        self.trend.clear()
+        self.trend1.setData([], [])
+        self.trend2.setData([], [])
+        self.scan_view.clear_path()
+        self.map_live.setText("ε' : —   ε'' : —")
+
+    def export_map(self):
+        if len(self.scan_map) == 0:
+            self.status.setText("Chemin vide : rien à exporter")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exporter le chemin", "carto.csv", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        self.scan_map.save_csv(path)
+        self.status.setText(f"Enregistré : {path}")
 
     @staticmethod
     def _pair(a, b):
@@ -695,6 +973,9 @@ class MainWindow(QMainWindow):
         if idx in (self.eps_tab_index, self.cls_tab_index):  # page ε* : son propre Smith
             self.stack.setCurrentIndex(2)
             self.smith.setVisible(False)
+        elif idx == self.map_tab_index:  # toute la largeur pour l'image
+            self.stack.setCurrentIndex(3)
+            self.smith.setVisible(False)
         else:
             self.stack.setCurrentIndex(1 if idx == self.cmp_tab_index else 0)
             self.smith.setVisible(True)
@@ -702,22 +983,23 @@ class MainWindow(QMainWindow):
     # -- waterfalls (ε' + isocontours ε'', ou tan δ)
     def on_wf_scale(self, *_):
         auto = self.wf_auto.isChecked()
-        groups = (
-            ("re", (self.wf_iso,)),  # échelle de couleurs de ε' (isocontours = ε'')
-            ("tan", (self.wf_tan,)),
-        )
-        for key, wfs in groups:
+        for key, wf in (("re", self.wf_iso), ("tan", self.wf_tan)):  # re : isocontours = ε''
             lo, hi = self.wf_lim[key, "min"], self.wf_lim[key, "max"]
             lo.setEnabled(not auto)
             hi.setEnabled(not auto)
-            for wf in wfs:
-                wf.set_manual_levels(lo.value(), hi.value())
-                wf.set_auto(auto)
-            if auto:  # affiche les bornes réellement appliquées
-                for sp, v in ((lo, wfs[0].levels[0]), (hi, wfs[0].levels[1])):
-                    sp.blockSignals(True)
-                    sp.setValue(v)
-                    sp.blockSignals(False)
+            wf.set_scale(lo.value(), hi.value(), auto)  # un seul rendu
+        self.sync_wf_spins()
+
+    def sync_wf_spins(self):
+        """En auto : affiche les bornes réellement appliquées (sans nouveau rendu)."""
+        if not self.wf_auto.isChecked():
+            return
+        for key, wf in (("re", self.wf_iso), ("tan", self.wf_tan)):
+            lo, hi = self.wf_lim[key, "min"], self.wf_lim[key, "max"]
+            for sp, v in ((lo, wf.levels[0]), (hi, wf.levels[1])):
+                sp.blockSignals(True)
+                sp.setValue(v)
+                sp.blockSignals(False)
 
     def on_wf_select(self, idx):
         """Un seul waterfall visible (les deux reçoivent les données : l'historique reste)."""
@@ -739,8 +1021,7 @@ class MainWindow(QMainWindow):
         e1, e2, tan = to_eps_columns(r.eps)
         self.wf_iso.push(freqs, e1, aux=e2)
         self.wf_tan.push(freqs, tan)
-        if self.wf_auto.isChecked():
-            self.on_wf_scale()
+        self.sync_wf_spins()
 
     def store_memory(self, n):
         if self.result is None or self.last is None:
@@ -930,6 +1211,12 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Capture {name}…")
 
     def on_sweep(self, freqs, s_raw, params):
+        try:
+            self._on_sweep(freqs, s_raw, params)
+        finally:
+            self.worker.ack()  # débloque le worker (contre-pression), même sur sweep rejeté
+
+    def _on_sweep(self, freqs, s_raw, params):
         is_capture = self.pending is not None
         if not is_capture and (self.filt.enabled or self.contact_min.value() > 0):
             r = self.pipeline.process(freqs, s_raw)
@@ -955,6 +1242,7 @@ class MainWindow(QMainWindow):
             self.push_waterfalls(freqs)
             self.collect_sweep(freqs)
             self.classify_sweep(freqs)
+            self.map_on_sweep(freqs, params)
 
     def redisplay(self):
         if self.last is None:
@@ -1148,8 +1436,15 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Enregistré : {path}")
 
     def closeEvent(self, ev):
+        self.hide()  # la fenêtre disparaît tout de suite, l'arrêt du sweep en cours se fait après
+        self.cam_timer.stop()
+        if self.cam_stream is not None:
+            self.cam_stream.stop()
+            self.cam_stream = None
         self.worker.stop()
         self._disconnect.emit()
         self.thread.quit()
-        self.thread.wait(3000)
+        if not self.thread.wait(10000):  # un sweep de 1001 pts dure ~3,3 s
+            self.thread.terminate()
+            self.thread.wait(1000)
         super().closeEvent(ev)
