@@ -92,6 +92,38 @@ class Pipeline:
         self.apply_cal = True
         return self.cal
 
+    # -- références ε* (air / court-circuit / liquide) ---------------------------
+    def save_refs(self, path):
+        """Sauve les références ε* capturées (.npz) pour éviter de les refaire.
+
+        Elles ne restent valables que sur la même grille de fréquences, le même
+        câble/capteur et la même puissance de source ; `process()` vérifie la grille.
+        """
+        got = [k for k in EPS_STANDARDS if k in self.standards]
+        if not got:
+            raise CalibrationError("aucune référence ε* à enregistrer")
+        data = {"names": np.array(got), "ref_liquid": np.array(self.ref_liquid)}
+        for k in got:
+            f, s = self.standards[k]
+            data[f"f_{k}"] = f
+            data[f"s_{k}"] = s
+        np.savez(path, **data)
+
+    def load_refs(self, path):
+        """Charge des références ε* sauvées ; renvoie la liste des noms chargés."""
+        try:
+            with np.load(path, allow_pickle=False) as z:
+                names = [str(n) for n in z["names"]]
+                loaded = {k: (np.array(z[f"f_{k}"], dtype=float),
+                              np.array(z[f"s_{k}"], dtype=complex)) for k in names}
+                liquid = str(z["ref_liquid"]) if "ref_liquid" in z else None
+        except (OSError, KeyError, ValueError) as e:
+            raise CalibrationError(f"références illisibles : {e}") from e
+        self.standards.update(loaded)
+        if liquid in REFERENCE_LIQUIDS:
+            self.ref_liquid = liquid
+        return names
+
     # -- traitement ------------------------------------------------------------
     def process(self, freqs, s_raw) -> Result:
         freqs = np.asarray(freqs, dtype=float)

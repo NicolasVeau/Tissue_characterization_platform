@@ -120,3 +120,37 @@ def test_cal_save_load(tmp_path):
     np.testing.assert_allclose(q.process(F, sraw(g)).s[:, 0], g, atol=1e-10)
     with pytest.raises(CalibrationError):
         Pipeline().save_cal(tmp_path / "b.cal")
+
+
+def test_refs_save_load_roundtrip(tmp_path):
+    """Les références ε* sauvées évitent de les recapturer : ε* identique après reload."""
+    p = Pipeline()
+    p.eps_mode = "three_ref"
+    p.ref_liquid = "water"
+    p.capture("air", F, sraw(probe(one(1))))
+    p.capture("probe_short", F, sraw(one(-1)))
+    p.capture("ref", F, sraw(probe(water_25c(F))))
+    path = tmp_path / "refs.npz"
+    p.save_refs(path)
+
+    q = Pipeline()
+    q.eps_mode = "three_ref"
+    names = q.load_refs(path)
+    assert set(names) == {"air", "probe_short", "ref"}
+    assert q.ref_liquid == "water"
+    eps_true = 15 - 4j
+    r = q.process(F, sraw(probe(one(eps_true))))
+    assert not r.notes
+    np.testing.assert_allclose(r.eps, eps_true, rtol=1e-9)
+
+
+def test_refs_save_empty_fails(tmp_path):
+    with pytest.raises(CalibrationError, match="aucune référence"):
+        Pipeline().save_refs(tmp_path / "x.npz")
+
+
+def test_refs_load_bad_file(tmp_path):
+    bad = tmp_path / "bad.npz"
+    bad.write_bytes(b"pas un npz")
+    with pytest.raises(CalibrationError, match="illisibles"):
+        Pipeline().load_refs(bad)
