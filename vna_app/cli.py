@@ -1,4 +1,4 @@
-"""CLI d'acquisition sans GUI : `python -m vna_app.cli {info,sweep,record,calibrate,eps}`."""
+"""CLI d'acquisition sans GUI : `python -m vna_app.cli {info,sweep,record,calibrate,eps,noise}`."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import queue
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
 
 from vna_app.calibration import Calibration, CalibrationError
 from vna_app.driver.litevna import LiteVNA, LiteVNAError
@@ -144,8 +146,6 @@ def _same_grid(name, f, ref):
 
 def cmd_eps(args) -> int:
     """ε* d'une sonde coaxiale ouverte à partir de S11 de fichiers .s2p."""
-    import numpy as np
-
     f, gx, _ = _load_s(args.sample)
     if args.c0 is not None:
         meta = Path(args.sample).with_suffix(".json")
@@ -177,6 +177,139 @@ def cmd_eps(args) -> int:
         fmt="%.9g",
     )
     print(f"{len(f)} points écrits dans {args.out} — méthode : {method}")
+    return 0
+
+
+def _cstd(s):
+    """Écart-type complexe (ddof=1) par fréquence : s (sweeps, N) -> (N,)."""
+    m = s.mean(axis=0)
+    return np.sqrt((np.abs(s - m) ** 2).sum(axis=0) / (s.shape[0] - 1))
+
+
+def _db(x) -> str:
+    return f"{20 * np.log10(max(float(x), 1e-12)):.1f} dB"
+
+
+def _eps_noise_gain(gx, ga, gs, gr, eps_ref):
+    """|dε*/dΓx| du birapport (permittivity.eps_three_reference) au point de mesure Γx.
+
+    K = (Γx−Γa)(Γs−Γr)/((Γx−Γr)(Γs−Γa)), ε = (1−K·εref)/(1−K) ; la dérivée est
+    analytique (fonctions de Möbius) : dK/dΓx = (Γs−Γr)(Γa−Γr)/((Γs−Γa)(Γx−Γr)²)
+    et dε/dK = (1−εref)/(1−K)². Le module est le facteur d'amplification du bruit.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        k = (gx - ga) * (gs - gr) / ((gx - gr) * (gs - ga))
+        dk = (gs - gr) * (ga - gr) / ((gs - ga) * (gx - gr) ** 2)
+        return np.abs((1 - eps_ref) / (1 - k) ** 2 * dk)
+
+
+def _load_eps_refs(path, freqs):
+    """Références ε* (.npz de la GUI / Pipeline.save_refs) -> (Γair, Γcc, Γref, ε_ref)."""
+    from vna_app.processing.pipeline import EPS_STANDARDS
+
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            names = [str(n) for n in z["names"]]
+            missing = [k for k in EPS_STANDARDS if k not in names]
+            if missing:
+                raise CalibrationError(f"références incomplètes : manque {', '.join(missing)}")
+            g = []
+            for k in EPS_STANDARDS:
+                f = np.asarray(z[f"f_{k}"], dtype=float)
+                if f.shape != freqs.shape or float(np.abs(f - freqs).max()) > 1.0:
+                    raise CalibrationError(f"{k}: grille différente du sweep demandé")
+                g.append(np.asarray(z[f"s_{k}"], dtype=complex)[:, 0])
+            liquid = str(z["ref_liquid"]) if "ref_liquid" in z else "water"
+    except (OSError, KeyError, ValueError) as e:
+        raise CalibrationError(f"références illisibles : {e}") from e
+    if liquid not in REFERENCE_LIQUIDS:
+        raise CalibrationError(f"liquide de référence inconnu : {liquid}")
+    print(f"références ε* chargées : {path} (liquide {liquid})")
+    return g[0], g[1], g[2], REFERENCE_LIQUIDS[liquid](freqs)
+
+
+def cmd_noise(args) -> int:
+    """Banc de bruit : sweeps répétés sur une charge FIXE -> σ(S11)/σ(S21) par averaging.
+
+    Ne rien toucher pendant la mesure (sonde dans l'air, ou sur une charge).
+    Avec --refs, propage σ(S11) en Δε* résoluble via la dérivée du birapport.
+    """
+    try:
+        avg_list = sorted({int(a) for a in args.avg_list.split(",")})
+    except ValueError:
+        raise ValueError(f"--avg-list invalide : {args.avg_list!r} (attendu ex. 1,4,16)") from None
+    if not avg_list or not all(1 <= a <= 0xFFFF for a in avg_list):
+        raise ValueError("--avg-list : valeurs dans 1..65535")
+    if args.sweeps < 2:
+        raise ValueError("--sweeps doit être ≥ 2")
+    refs = None
+    freqs = None
+    meds, dts, sig11s, sig21s, mean11s, gains, depss = [], [], [], [], [], [], []
+    with open_device(args.port) as vna:
+        info = vna.device_info()
+        print(
+            f"firmware {info['firmware']} — {args.points} pts, "
+            f"{args.start / 1e6:g}–{args.stop / 1e6:g} MHz, {args.sweeps} sweeps par averaging"
+        )
+        print("charge fixe requise : ne pas toucher la sonde pendant la mesure")
+        head = (
+            f"{'avg':>5}  {'s/sweep':>8}  {'entrées/s':>9}  "
+            f"{'σ(S11) méd':>11}  {'p95':>9}  {'σ(S21) méd':>11}"
+        )
+        if args.refs:
+            head += f"  {'Δε méd':>8}  {'Δε p95':>8}"
+        for avg in avg_list:
+            freqs = vna.configure_sweep(args.start, args.stop, args.points, avg)
+            if refs is None and args.refs:
+                refs = _load_eps_refs(args.refs, freqs)
+                print(head)
+            elif avg == avg_list[0] and not args.refs:
+                print(head)
+            vna.sweep()  # sweep de chauffe écarté (points de stabilisation après reconfig)
+            t0 = time.monotonic()
+            s = np.stack([vna.sweep()[1] for _ in range(args.sweeps)])
+            dt = (time.monotonic() - t0) / args.sweeps
+            sig11, sig21 = _cstd(s[:, :, 0]), _cstd(s[:, :, 1])
+            mean11 = s[:, :, 0].mean(axis=0)
+            meds.append(float(np.median(sig11)))
+            dts.append(dt)
+            sig11s.append(sig11)
+            sig21s.append(sig21)
+            mean11s.append(mean11)
+            line = (
+                f"{avg:>5}  {dt:>8.2f}  {args.points * avg / dt:>9.0f}  "
+                f"{_db(np.median(sig11)):>11}  {_db(np.percentile(sig11, 95)):>9}  "
+                f"{_db(np.median(sig21)):>11}"
+            )
+            if refs is not None:
+                ga, gcc, gr, eps_ref = refs
+                gain = _eps_noise_gain(mean11, ga, gcc, gr, eps_ref)
+                deps = gain * sig11
+                gains.append(gain)
+                depss.append(deps)
+                line += f"  {np.median(deps):>8.3g}  {np.percentile(deps, 95):>8.3g}"
+            print(line)
+    if len(avg_list) > 1 and meds[0] > 0:
+        parts = ", ".join(
+            f"avg={a} ×{m / meds[0]:.2f} (attendu {np.sqrt(avg_list[0] / a):.2f})"
+            for a, m in zip(avg_list[1:], meds[1:])
+        )
+        print(f"échelle du bruit vs avg={avg_list[0]} : {parts}")
+    if args.out:
+        data = {
+            "freqs": freqs,
+            "avgs": np.array(avg_list),
+            "sweeps": args.sweeps,
+            "t_sweep": np.array(dts),
+            "sigma_s11": np.stack(sig11s),
+            "sigma_s21": np.stack(sig21s),
+            "mean_s11": np.stack(mean11s),
+        }
+        if gains:
+            data["eps_gain"] = np.stack(gains)
+            data["deps_s11"] = np.stack(depss)
+        np.savez(args.out, **data)
+        print(f"détail par fréquence écrit dans {args.out}")
     return 0
 
 
@@ -226,6 +359,19 @@ def main(argv=None) -> int:
     ep.add_argument("--c0", type=float, help="capacité de frange (F) : méthode capacitive")
     ep.add_argument("--smooth", type=int, default=1, help="fenêtre Savitzky-Golay (impair)")
     ep.add_argument("--out", required=True, help="fichier .csv")
+    nz = sub.add_parser("noise", help="banc de bruit : sweeps répétés sur charge fixe -> σ(Γ)")
+    nz.add_argument("--start", type=float, default=400e6, help="Hz (défaut 400 MHz)")
+    nz.add_argument("--stop", type=float, default=3e9, help="Hz (défaut 3 GHz)")
+    nz.add_argument("--points", type=int, default=201)
+    nz.add_argument("--avg-list", default="1,4,16", help="valeurs d'averaging, ex. 1,4,16")
+    nz.add_argument(
+        "--sweeps", type=int, default=10, help="sweeps par valeur d'averaging (≥ 2, défaut 10)"
+    )
+    nz.add_argument(
+        "--refs",
+        help="références ε* .npz (GUI « Sauver les références ») : propage σ(S11) en Δε*",
+    )
+    nz.add_argument("--out", help="détail par fréquence -> fichier .npz")
     args = p.parse_args(argv)
     try:
         return {
@@ -234,6 +380,7 @@ def main(argv=None) -> int:
             "record": cmd_record,
             "calibrate": cmd_calibrate,
             "eps": cmd_eps,
+            "noise": cmd_noise,
         }[args.cmd](args)
     except (LiteVNAError, CalibrationError, RecordError) as e:
         print(f"erreur: {e}", file=sys.stderr)
