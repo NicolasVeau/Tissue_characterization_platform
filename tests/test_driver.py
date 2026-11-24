@@ -312,3 +312,44 @@ def test_set_power_roundtrip_on_sim():
         assert v.get_power() == (0, 2)
         with pytest.raises(ValueError):
             v.set_power(adf4350=4)
+
+
+# -- grille anti-raies ---------------------------------------------------------------
+
+
+def _dist_min(start, stop, points, comb=12_000_000):
+    step = (stop - start) // (points - 1) if points > 1 else 0
+    return min(
+        min((start + k * step) % comb, comb - (start + k * step) % comb) for k in range(points)
+    )
+
+
+def test_antispur_coarse_step_rounded_to_comb():
+    start, stop, points, clr = L.antispur_grid(400_000_000, 3_000_000_000, 201)
+    step = (stop - start) // (points - 1)
+    assert step % L.SPUR_COMB_HZ == 0
+    assert clr == 6_000_000
+    assert _dist_min(start, stop, points) >= clr  # aucun point sur le peigne
+    assert abs(start - 400_000_000) <= 6_000_000  # bande quasi inchangée
+    assert abs(stop - 3_000_000_000) <= 12_000_000
+
+
+def test_antispur_fine_step_kept_start_shifted():
+    start, stop, points, clr = L.antispur_grid(400_000_000, 3_000_000_000, 1001)
+    assert points == 1001
+    assert (stop - start) // 1000 == 2_600_000  # pas conservé (plus fin que le peigne)
+    assert 0 < clr <= 6_000_000
+    assert _dist_min(start, stop, points) >= clr
+    assert abs(start - 400_000_000) <= 200_000
+
+
+def test_antispur_cw_half_tooth():
+    start, stop, points, _ = L.antispur_grid(2_220_000_000, 2_220_000_000, 1)
+    assert start == stop
+    assert start % L.SPUR_COMB_HZ == 6_000_000
+
+
+def test_antispur_idempotent():
+    for args in ((400_000_000, 3_000_000_000, 201), (400_000_000, 3_000_000_000, 1001)):
+        g = L.antispur_grid(*args)
+        assert L.antispur_grid(g[0], g[1], g[2]) == g

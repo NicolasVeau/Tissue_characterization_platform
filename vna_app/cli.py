@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from vna_app.calibration import Calibration, CalibrationError
-from vna_app.driver.litevna import LiteVNA, LiteVNAError
+from vna_app.driver.litevna import LiteVNA, LiteVNAError, antispur_grid
 from vna_app.driver.sim import open_device
 from vna_app.processing.export import write_s2p
 from vna_app.processing.filters import smooth_complex
@@ -22,6 +22,20 @@ from vna_app.processing.permittivity import (
     to_eps_columns,
 )
 from vna_app.processing.record import RecordError, SweepRecorder
+
+
+def _apply_antispur(args) -> None:
+    """Décale la grille demandée pour éviter le peigne de raies du LiteVNA (--antispur)."""
+    if not getattr(args, "antispur", False):
+        return
+    start, stop, points, clr = antispur_grid(
+        int(round(args.start)), int(round(args.stop)), args.points
+    )
+    print(
+        f"grille anti-raies : {start / 1e6:g}–{stop / 1e6:g} MHz, {points} pts "
+        f"(écart au peigne 12 MHz ≥ {clr / 1e6:g} MHz)"
+    )
+    args.start, args.stop, args.points = float(start), float(stop), points
 
 
 def cmd_info(args) -> int:
@@ -40,6 +54,7 @@ def cmd_sweep(args) -> int:
         print("erreur: --out doit se terminer par .s2p", file=sys.stderr)
         return 2
     cal = Calibration.load(args.cal) if args.cal else None
+    _apply_antispur(args)
     with LiteVNA(args.port) as vna:
         info = vna.device_info()
         if args.power is not None:
@@ -72,6 +87,7 @@ def cmd_record(args) -> int:
     if args.count is None and args.duration is None:
         print("erreur: fournir --count et/ou --duration", file=sys.stderr)
         return 2
+    _apply_antispur(args)
     with open_device(args.port) as vna:
         info = vna.device_info()
         vna.configure_sweep(args.start, args.stop, args.points, args.avg)
@@ -242,6 +258,7 @@ def cmd_noise(args) -> int:
         raise ValueError("--avg-list : valeurs dans 1..65535")
     if args.sweeps < 2:
         raise ValueError("--sweeps doit être ≥ 2")
+    _apply_antispur(args)
     refs = None
     freqs = None
     meds, dts, sig11s, sig21s, mean11s, gains, depss = [], [], [], [], [], [], []
@@ -372,6 +389,12 @@ def main(argv=None) -> int:
         help="références ε* .npz (GUI « Sauver les références ») : propage σ(S11) en Δε*",
     )
     nz.add_argument("--out", help="détail par fréquence -> fichier .npz")
+    for sp in (sw, rc, nz):
+        sp.add_argument(
+            "--antispur",
+            action="store_true",
+            help="décale la grille pour éviter les raies internes du LiteVNA (peigne 12 MHz)",
+        )
     args = p.parse_args(argv)
     try:
         return {

@@ -80,3 +80,13 @@ def test_noise_bad_avg_list_exit_2(tmp_path, capsys):
     rc = cli.main(["--port", "sim:rate=0", "noise", "--avg-list", "abc", "--sweeps", "4"])
     assert rc == 2
     assert "avg-list" in capsys.readouterr().err
+
+
+def test_noise_antispur_avoids_comb(tmp_path, capsys):
+    rc, out = run(tmp_path, "--antispur")
+    assert rc == 0
+    assert "anti-raies" in capsys.readouterr().out
+    with np.load(out) as z:
+        f = z["freqs"]
+    r = f % 12e6
+    assert float(np.minimum(r, 12e6 - r).min()) >= 6e6 - 1.0  # tous à une demi-dent

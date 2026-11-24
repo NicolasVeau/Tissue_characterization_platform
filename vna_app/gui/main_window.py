@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
 )
 
 from vna_app.calibration import CalibrationError
+from vna_app.driver.litevna import antispur_grid
 from vna_app.gui.scanview import ScanView
 from vna_app.gui.smith import SmithChart
 from vna_app.gui.waterfall import Waterfall
@@ -265,6 +266,15 @@ class MainWindow(QMainWindow):
         self.avg.setValue(1)
         self.pwr_high = self._power_combo(3, "Puissance de la source au-dessus de ~140 MHz")
         self.pwr_low = self._power_combo(1, "Puissance de la source en dessous de ~140 MHz")
+        self.chk_antispur = QCheckBox("Grille anti-raies (peigne 12 MHz du LiteVNA)")
+        self.chk_antispur.setToolTip(
+            "Décale le départ et arrondit le pas pour qu'aucun point ne tombe sur les raies\n"
+            "d'instabilité internes du LiteVNA (multiples de 12 MHz : 1908, 1944, 2220 MHz…,\n"
+            "jitter de trace 10–20 dB au-dessus du plancher, insensible à l'averaging).\n"
+            "Les bords de bande bougent de quelques MHz au plus. ATTENTION : la grille change,\n"
+            "la calibration et les références ε* doivent être (re)prises avec la case dans le\n"
+            "même état."
+        )
         self.btn_conn = QPushButton("Connecter")
         self.btn_single = QPushButton("Sweep unique")
         self.btn_cont = QPushButton("Continu")
@@ -281,6 +291,7 @@ class MainWindow(QMainWindow):
         form.addRow("Moyenne", self.avg)
         form.addRow("Puissance > 140 MHz", self.pwr_high)
         form.addRow("Puissance < 140 MHz", self.pwr_low)
+        form.addRow("", self.chk_antispur)
         self.cal_lock = QLabel("")
         self.cal_lock.setWordWrap(True)
         self.filt = SweepFilter()
@@ -1544,14 +1555,21 @@ class MainWindow(QMainWindow):
         if self.pending is None:
             self.align_to_cal()
         self._power.emit(self.pwr_high.currentData(), self.pwr_low.currentData())
-        self._configure.emit(
-            self.start_mhz.value() * 1e6,
-            self.stop_mhz.value() * 1e6,
-            self.points.value(),
-            self.avg.value(),
-        )
+        start_hz = self.start_mhz.value() * 1e6
+        stop_hz = self.stop_mhz.value() * 1e6
+        points = self.points.value()
+        note = ""
+        if self.chk_antispur.isChecked():
+            start_hz, stop_hz, points, clr = antispur_grid(
+                int(round(start_hz)), int(round(stop_hz)), points
+            )
+            note = (
+                f" — grille anti-raies : {start_hz / 1e6:g}–{stop_hz / 1e6:g} MHz, "
+                f"{points} pts (écart ≥ {clr / 1e6:g} MHz)"
+            )
+        self._configure.emit(float(start_hz), float(stop_hz), points, self.avg.value())
         self._run.emit(continuous)
-        self.status.setText("Acquisition…")
+        self.status.setText("Acquisition…" + note)
 
     def toggle_continuous(self, on):
         if on:

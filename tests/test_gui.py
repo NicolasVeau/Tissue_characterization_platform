@@ -770,3 +770,16 @@ def test_poll_camera_downscale_keeps_full_res_coords(win):
     assert img.transform().m11() == _pytest.approx(1.0)
     win.cam_stream = None
     win.cam_timer.stop()
+
+
+def test_antispur_checkbox_adjusts_grid(win):
+    """La case anti-raies décale la grille émise au worker : départ à une demi-dent,
+    pas multiple du peigne 12 MHz."""
+    got = []
+    win._configure.connect(lambda a, b, n, g: got.append((a, b, n)))
+    win.chk_antispur.setChecked(True)
+    MainWindow.start(win, False)  # la fixture neutralise win.start (pas de matériel)
+    a, b, n = got[-1]
+    assert a % 12e6 == 6e6
+    assert ((b - a) / (n - 1)) % 12e6 == 0
+    assert "anti-raies" in win.status.text()

@@ -6,6 +6,7 @@ Ce module est synchrone ; l'appelant GUI doit l'exécuter hors du thread Qt.
 
 from __future__ import annotations
 
+import math
 import queue
 import struct
 import threading
@@ -52,6 +53,43 @@ assert FRAME_SIZE == 32
 
 MAX_POINTS = 65535
 MAX_FIFO_READ = 255
+
+# Peigne de raies d'instabilité du LiteVNA, mesuré au banc (2026-11-24, firmware 2.2) :
+# certains multiples entiers ou demi-entiers du TCXO 24 MHz (1908, 1944, 2184, 2196,
+# 2220, 2556 MHz…) montrent un jitter de trace S11 10 à 20 dB au-dessus du plancher,
+# insensible à l'averaging (croisements d'harmoniques / frontières de PLL internes ;
+# vérifié indépendant de la charge CPU de l'hôte). Largeur observée < 0,5 MHz.
+SPUR_COMB_HZ = 12_000_000
+
+
+def antispur_grid(
+    start_hz: int, stop_hz: int, points: int, comb_hz: int = SPUR_COMB_HZ
+) -> Tuple[int, int, int, int]:
+    """Ajuste (start, stop, points) pour qu'aucun point ne tombe sur le peigne de raies.
+
+    Retourne (start, stop, points, écart_garanti_hz). Idempotent.
+
+    - Pas demandé ≥ peigne : pas arrondi au multiple du peigne, départ décalé d'une
+      demi-dent (tous les points à comb/2 des raies) ; le nombre de points est recalculé
+      pour couvrir à peu près la même bande (bords déplacés de quelques MHz au plus).
+    - Pas plus fin : le pas est conservé, seul le départ est décalé pour centrer les
+      résidus entre les dents ; l'écart garanti tombe à pgcd(pas, peigne)/2 — c'est à
+      l'appelant de juger s'il suffit (raies larges de < 0,5 MHz au banc).
+    """
+    start, stop, points = int(round(start_hz)), int(round(stop_hz)), int(points)
+    half = comb_hz // 2
+    step_req = (stop - start) // (points - 1) if points > 1 else 0
+    if step_req >= comb_hz:
+        step = round(step_req / comb_hz) * comb_hz
+        points = max(2, int(round((stop - start) / step)) + 1)
+        start = round((start - half) / comb_hz) * comb_hz + half
+        return start, start + (points - 1) * step, points, half
+    if step_req == 0:  # fréquence fixe (point unique ou pas quantifié à 0)
+        start = round((start - half) / comb_hz) * comb_hz + half
+        return start, start, points, half
+    g = math.gcd(step_req, comb_hz)
+    start += (g // 2 - start % g) % g  # tous les points ≡ g/2 (mod g), raies ≡ 0 (mod g)
+    return start, start + (points - 1) * step_req, points, g // 2
 
 
 class LiteVNAError(Exception):
