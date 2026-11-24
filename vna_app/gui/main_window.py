@@ -7,9 +7,11 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QImage
 from PyQt5.QtWidgets import (
     QAbstractSpinBox,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -22,6 +24,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QTabWidget,
@@ -56,6 +59,22 @@ CAL_LABELS = {"open": "Open", "short": "Short", "load": "Load", "thru": "Thru (S
 EPS_LABELS = {"air": "Air", "probe_short": "Court-circuit", "ref": "Liquide de réf."}
 
 
+def _display_decimation(scale, hold, period_s, interval_s):
+    """Facteur de sous-échantillonnage de l'image affichée -> (facteur 1|2|4, hold).
+
+    Dégrade vite (période réelle > 3× l'intervalle demandé), remonte prudemment
+    (période quasi nominale, et seulement après un long répit) pour éviter le pompage.
+    `hold` est un compteur de ticks pendant lesquels on ne réévalue pas.
+    """
+    if hold > 0:
+        return scale, hold - 1
+    if period_s > 3.0 * interval_s and scale < 4:
+        return scale * 2, 30
+    if period_s < 1.15 * interval_s and scale > 1:
+        return scale // 2, 150
+    return scale, 0
+
+
 def _db(x):
     with np.errstate(divide="ignore"):
         return 20 * np.log10(np.abs(x))
@@ -83,6 +102,9 @@ ZONES = [
 LAST_CAL = Path(
     os.environ.get("VNA_APP_LAST_CAL") or Path.home() / ".config" / "vna_app" / "last_cal"
 )
+LAST_REFS = Path(
+    os.environ.get("VNA_APP_LAST_REFS") or Path.home() / ".config" / "vna_app" / "last_refs"
+)
 
 
 class MainWindow(QMainWindow):
@@ -95,7 +117,10 @@ class MainWindow(QMainWindow):
     def __init__(self, port: str = "/dev/litevna"):
         super().__init__()
         self.setWindowTitle("vna_app — LiteVNA 64")
-        self.resize(1500, 800)
+        # bornée à l'écran disponible : en déporté (ssh -X / XQuartz) l'écran peut être
+        # plus petit que 1500×800 et le bord gauche (onglets) sortirait de l'affichage
+        avail = QApplication.desktop().availableGeometry()
+        self.resize(min(1500, avail.width() - 40), min(800, avail.height() - 60))
         self.info = None
         self.last = None  # (freqs, s_raw, params)
         self.result = None  # processing.pipeline.Result
@@ -105,13 +130,18 @@ class MainWindow(QMainWindow):
 
         self.mem = {1: None, 2: None}  # Snapshot ou None
         tabs = QTabWidget()
-        tabs.addTab(self._build_acq_tab(), "Acq.")
-        tabs.addTab(self._build_cal_tab(), "Cal.")
-        self.eps_tab_index = tabs.addTab(self._build_eps_tab(), "ε*")
-        self.cmp_tab_index = tabs.addTab(self._build_cmp_tab(), "Comp.")
-        self.cls_tab_index = tabs.addTab(self._build_cls_tab(), "Zone")
-        self.map_tab_index = tabs.addTab(self._build_map_tab(), "Carto")
-        tabs.setFixedWidth(310)
+        tabs.setUsesScrollButtons(True)  # barre d'onglets défilable si la place manque
+        tabs.addTab(self._scroll(self._build_acq_tab()), "Acq.")
+        tabs.addTab(self._scroll(self._build_cal_tab()), "Cal.")
+        self.eps_tab_index = tabs.addTab(self._scroll(self._build_eps_tab()), "ε*")
+        self.cmp_tab_index = tabs.addTab(self._scroll(self._build_cmp_tab()), "Comp.")
+        self.cls_tab_index = tabs.addTab(self._scroll(self._build_cls_tab()), "Zone")
+        self.map_tab_index = tabs.addTab(self._scroll(self._build_map_tab()), "Carto")
+        # en X11 distant (ssh -X depuis un Mac) les polices sont plus larges : la
+        # largeur suit la barre d'onglets au lieu d'être figée, sinon des onglets
+        # (Carto…) sortent du cadre et deviennent inaccessibles
+        side_width = max(310, tabs.tabBar().sizeHint().width() + 12)
+        tabs.setFixedWidth(side_width)
         self.status = QLabel("Déconnecté")
         self.status.setWordWrap(True)
         side = QVBoxLayout()
@@ -119,7 +149,7 @@ class MainWindow(QMainWindow):
         side.addWidget(self.status)
         side_w = QWidget()
         side_w.setLayout(side)
-        side_w.setFixedWidth(310)
+        side_w.setFixedWidth(side_width)
 
         self.plot11 = pg.PlotWidget(title="|Z| (brut)")
         self.plot21 = pg.PlotWidget(title="Phase Z déroulée (brut)")
@@ -201,7 +231,20 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self.on_error)
         self.thread.start()
         self.load_last_cal()
+        self.load_last_refs()
+        self._carto_restore()  # les réglages Carto (teintes mesurées…) survivent au redémarrage
         self.refresh_buttons()
+
+    @staticmethod
+    def _scroll(w):
+        """Colonne de contrôles défilable : tout reste accessible sur un petit écran
+        (affichage déporté ssh -X) au lieu d'être rogné en bas."""
+        sa = QScrollArea()
+        sa.setWidget(w)
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QScrollArea.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return sa
 
     # -- construction des onglets ----------------------------------------------
     def _build_acq_tab(self):
@@ -379,8 +422,19 @@ class MainWindow(QMainWindow):
             lay.addWidget(b)
         self.eps_captured = QLabel("Capturées : —")
         self.eps_captured.setWordWrap(True)
+        self.btn_save_refs = QPushButton("Enregistrer les références (.npz)…")
+        self.btn_save_refs.setToolTip(
+            "Sauve air / court-circuit / liquide pour ne pas les recapturer à chaque "
+            "session. Valables uniquement : même grille de fréquences, même câble, "
+            "même puissance ; à refaire si la température ou le montage change."
+        )
+        self.btn_load_refs = QPushButton("Charger des références…")
+        self.btn_save_refs.clicked.connect(self.save_refs)
+        self.btn_load_refs.clicked.connect(self.load_refs)
         self.btn_save_eps = QPushButton("Enregistrer ε* (.csv)…")
         lay.addWidget(self.eps_captured)
+        lay.addWidget(self.btn_save_refs)
+        lay.addWidget(self.btn_load_refs)
         lay.addWidget(self.btn_save_eps)
 
         # waterfalls : historique et calibration des couleurs
@@ -440,12 +494,22 @@ class MainWindow(QMainWindow):
     def _build_map_tab(self):
         self.cam_stream = None  # vision.camera.CameraStream ou None
         self.cam_tracker = None  # vision.tracker.RingTracker pendant la capture
+        self.depth_stream = None  # vision.depth.DepthStream ou None
         self.scan_positions = PositionBuffer()
         self.scan_map = ScanMap()
         self.trend = deque(maxlen=1000)  # (t, ε', ε'') par sweep
         self.cam_timer = QTimer(self)
-        self.cam_timer.setInterval(66)  # ~15 Hz d'affichage ; la capture tourne à 30
+        # Mono-coup, réarmé en FIN de poll_camera : le tick suivant n'est programmé
+        # qu'une fois le dessin précédent terminé. Sur un affichage lent (X11 via SSH),
+        # un timer périodique accumule des trames en retard dans la file d'événements
+        # et la GUI entière (onglets compris) devient inutilisable.
+        self.cam_timer.setSingleShot(True)
+        self.cam_timer.setInterval(66)  # ~15 Hz d'affichage max ; la capture tourne à 30
         self.cam_timer.timeout.connect(self.poll_camera)
+        self._cam_tick = None  # dernier tick (monotonic) pour mesurer la période réelle
+        self._cam_period = 0.0  # période réelle lissée (EMA)
+        self._cam_scale = 1  # sous-échantillonnage de l'image AFFICHÉE (1, 2, 4)
+        self._cam_hold = 0  # ticks avant de réévaluer _cam_scale (anti-pompage)
 
         self.cam_device = QComboBox()
         self.cam_device.setEditable(True)
@@ -459,8 +523,11 @@ class MainWindow(QMainWindow):
         )
         self.cam_expo = QSpinBox()
         self.cam_expo.setRange(1, 5000)
-        self.cam_expo.setValue(156)
-        self.cam_expo.setToolTip("Exposition V4L2 (unités de 100 µs)")
+        self.cam_expo.setValue(80)
+        self.cam_expo.setToolTip(
+            "Exposition V4L2 (unités de 100 µs). Trop haute, la scène sature (V ≈ 250), "
+            "la saturation des couleurs s'effondre et la détection HSV décroche."
+        )
         self.cam_wb = QSpinBox()
         self.cam_wb.setRange(2000, 8000)
         self.cam_wb.setSingleStep(100)
@@ -468,16 +535,29 @@ class MainWindow(QMainWindow):
         self.cam_wb.setSuffix(" K")
         for w in (self.chk_cam_auto, self.cam_expo, self.cam_wb):
             (w.toggled if w is self.chk_cam_auto else w.valueChanged).connect(self.on_cam_controls)
+        self.chk_depth = QCheckBox("Normale à la surface (profondeur)")
+        self.chk_depth.setChecked(True)
+        self.chk_depth.setToolTip(
+            "Lit le flux Z16 de la RealSense (/dev/video0, V4L2 brut) et ajuste un plan "
+            "local sous la pointe : flèche turquoise + inclinaison en degrés. "
+            "Si le flux ne démarre pas, la carto continue sans la normale."
+        )
+        self.chk_depth.toggled.connect(self.on_depth_toggle)
+        self.depth_device = QComboBox()
+        self.depth_device.setEditable(True)
+        self.depth_device.addItem("/dev/video0")  # nœud UVC profondeur de la D4xx
 
         self.trk_sp = {}
         tform = QFormLayout()
-        # défauts = mesures sur la bague turquoise réelle (voir vision/tracker.py)
+        # défauts = banc du 2026-11-24 ; la teinte dépend de l'éclairage → boutons Mesurer
         for key, label, lo, hi, val in (
-            ("h_center", "Teinte H centre (turquoise = 95)", 0, 179, 95),
-            ("h_width", "Teinte H ± (gaine bleue à H≈105 !)", 1, 60, 5),
-            ("s_min", "Saturation min", 0, 255, 120),
-            ("v_min", "Valeur min", 0, 255, 100),
-            ("min_area", "Aire min (px²)", 1, 100000, 40),
+            ("h_center", "Bague : H centre", 0, 179, 84),
+            ("h_width", "Bague : H ±", 1, 60, 6),
+            ("s_min", "Saturation min", 0, 255, 90),
+            ("v_min", "Valeur min", 0, 255, 40),
+            ("min_area", "Aire min (px²)", 1, 100000, 20),
+            ("sheath_h_center", "Gaine : H centre (axe bleu)", 0, 179, 99),
+            ("sheath_h_width", "Gaine : H ± (0 = sans axe)", 0, 60, 5),
         ):
             sp = QSpinBox()
             sp.setRange(lo, hi)
@@ -485,6 +565,22 @@ class MainWindow(QMainWindow):
             sp.valueChanged.connect(self.on_tracker_params)
             self.trk_sp[key] = sp
             tform.addRow(label, sp)
+        self._pick_mode = None  # None | "ring" | "sheath" (clic de mesure attendu)
+        self.btn_pick_ring = QPushButton("Mesurer la bague (clic sur l'image)")
+        self.btn_pick_sheath = QPushButton("Mesurer la gaine (clic sur l'image)")
+        for b in (self.btn_pick_ring, self.btn_pick_sheath):
+            b.setCheckable(True)
+            b.setToolTip(
+                "Caméra démarrée : cliquer sur la bague/gaine dans l'image mesure son "
+                "HSV réel (médiane d'un voisinage 11×11) et règle les seuils. À refaire "
+                "après tout changement d'éclairage, d'exposition ou de balance des blancs."
+            )
+        self.btn_pick_ring.toggled.connect(lambda on: self._set_pick("ring", on))
+        self.btn_pick_sheath.toggled.connect(lambda on: self._set_pick("sheath", on))
+        self.chk_mask = QCheckBox("Afficher le masque HSV (magenta = bague, jaune = gaine)")
+        self.chk_mask.setToolTip(
+            "Superpose ce que le tracker voit réellement : indispensable pour régler."
+        )
         self.tip_dx = QSpinBox()
         self.tip_dy = QSpinBox()
         for sp in (self.tip_dx, self.tip_dy):
@@ -511,14 +607,32 @@ class MainWindow(QMainWindow):
         self.map_pt = QSpinBox()
         self.map_pt.setRange(2, 40)
         self.map_pt.setValue(9)
+        self.map_cmap = QComboBox()
+        for key, label in (
+            ("magenta", "Magenta (défaut, lisible sur la scène)"),
+            ("turbo", "Turbo (arc-en-ciel)"),
+            ("viridis", "Viridis"),
+            ("plasma", "Plasma"),
+        ):
+            self.map_cmap.addItem(label, key)
+        self.map_cmap.setToolTip(
+            "Turbo différencie le plus, mais sa luminosité n'est pas monotone et ses "
+            "teintes recoupent la bague (turquoise) et la croix (vert/rouge)."
+        )
+        self.map_cmap.currentIndexChanged.connect(self.on_map_cmap)
         mform = QFormLayout()
         mform.addRow("Bande résumé ε*", self._pair(self.map_flo, self.map_fhi))
         mform.addRow("Contact min |ε*−1|", self.map_contact)
         mform.addRow("Taille des points (px)", self.map_pt)
+        mform.addRow("Palette", self.map_cmap)
 
         self.btn_map_clear = QPushButton("Effacer le chemin")
         self.btn_map_clear.clicked.connect(self.clear_map)
-        self.btn_map_csv = QPushButton("Exporter le chemin (.csv)…")
+        self.btn_map_csv = QPushButton("Exporter chemin + image…")
+        self.btn_map_csv.setToolTip(
+            "Sauve les points (.csv), l'image caméra brute (_image.png) et la vue "
+            "annotée chemin/axe/normale (_vue.png)."
+        )
         self.btn_map_csv.clicked.connect(self.export_map)
         self.cam_status = QLabel("Caméra arrêtée")
         self.cam_status.setWordWrap(True)
@@ -531,9 +645,14 @@ class MainWindow(QMainWindow):
         eform = QFormLayout()
         eform.addRow("Exposition", self.cam_expo)
         eform.addRow("Balance des blancs", self.cam_wb)
+        eform.addRow("Nœud profondeur", self.depth_device)
         lay.addLayout(eform)
+        lay.addWidget(self.chk_depth)
         lay.addWidget(QLabel("Bague vert clair (HSV) :"))
         lay.addLayout(tform)
+        lay.addWidget(self.btn_pick_ring)
+        lay.addWidget(self.btn_pick_sheath)
+        lay.addWidget(self.chk_mask)
         lay.addWidget(QLabel("Cartographie (ε* du sweep en contact) :"))
         lay.addLayout(mform)
         lay.addWidget(self.btn_map_clear)
@@ -544,8 +663,67 @@ class MainWindow(QMainWindow):
         w.setLayout(lay)
         return w
 
+    # -- persistance des réglages Carto (un réglage HSV qui marche ne doit pas se perdre)
+    def _carto_spins(self):
+        d = {f"trk_{k}": sp for k, sp in self.trk_sp.items()}
+        d.update(
+            tip_dx=self.tip_dx, tip_dy=self.tip_dy, map_pt=self.map_pt,
+            cam_expo=self.cam_expo, cam_wb=self.cam_wb,
+        )
+        return d
+
+    def _carto_dspins(self):
+        return {"map_flo": self.map_flo, "map_fhi": self.map_fhi, "map_contact": self.map_contact}
+
+    def _settings(self):
+        if os.environ.get("VNA_APP_NO_SETTINGS"):
+            return None
+        return QSettings("vna_app", "vna_app")
+
+    def _carto_save(self, settings=None):
+        s = settings if settings is not None else self._settings()
+        if s is None:
+            return
+        for key, sp in self._carto_spins().items():
+            s.setValue(f"carto/{key}", sp.value())
+        for key, sp in self._carto_dspins().items():
+            s.setValue(f"carto/{key}", sp.value())
+        s.setValue("carto/cmap", self.map_cmap.currentData())
+        s.setValue("carto/cam_auto", self.chk_cam_auto.isChecked())
+        s.setValue("carto/depth_on", self.chk_depth.isChecked())
+        s.setValue("carto/cam_device", self.cam_device.currentText())
+        s.setValue("carto/depth_device", self.depth_device.currentText())
+
+    def _carto_restore(self, settings=None):
+        s = settings if settings is not None else self._settings()
+        if s is None:
+            return
+        for key, sp in self._carto_spins().items():
+            v = s.value(f"carto/{key}")
+            if v is not None:
+                sp.setValue(int(float(v)))
+        for key, sp in self._carto_dspins().items():
+            v = s.value(f"carto/{key}")
+            if v is not None:
+                sp.setValue(float(v))
+        cmap = s.value("carto/cmap")
+        if cmap is not None and self.map_cmap.findData(cmap) >= 0:
+            self.map_cmap.setCurrentIndex(self.map_cmap.findData(cmap))
+        for key, chk in (("carto/cam_auto", self.chk_cam_auto), ("carto/depth_on", self.chk_depth)):
+            v = s.value(key)
+            if v is not None:
+                chk.setChecked(str(v).lower() == "true")
+        for key, cb in (
+            ("carto/cam_device", self.cam_device),
+            ("carto/depth_device", self.depth_device),
+        ):
+            v = s.value(key)
+            if v:
+                cb.setCurrentText(str(v))
+
     def _build_map_page(self):
         self.scan_view = ScanView()
+        self.scan_view.clicked.connect(self.on_scan_click)
         self.map_pt.valueChanged.connect(self.scan_view.set_point_size)
         self.map_live = QLabel("ε' : —   ε'' : —")
         self.map_live.setStyleSheet("font-size: 16px; font-weight: bold;")
@@ -570,6 +748,7 @@ class MainWindow(QMainWindow):
     def toggle_camera(self, on):
         if not on:
             self.cam_timer.stop()
+            self._stop_depth()
             if self.cam_stream is not None:
                 self.cam_stream.stop()
                 self.cam_stream = None
@@ -602,7 +781,43 @@ class MainWindow(QMainWindow):
         self.cam_stream = stream
         self.btn_cam.setText("Arrêter la caméra")
         self.cam_status.setText(f"Caméra : {stream.device} ({stream.width}×{stream.height})")
+        if self.chk_depth.isChecked():
+            self._start_depth()
+        self._cam_tick, self._cam_period = None, 0.0
+        self._cam_scale, self._cam_hold = 1, 0
         self.cam_timer.start()
+
+    def on_depth_toggle(self, on):
+        """La profondeur peut être (dés)activée pendant que la caméra tourne."""
+        if self.cam_stream is None:
+            return
+        if on:
+            self._start_depth()
+        else:
+            self._stop_depth()
+            self.scan_view.set_normal(0.0, 0.0, None)
+
+    def _start_depth(self):
+        if self.depth_stream is not None:
+            return
+        from vna_app.vision.depth import DepthError, DepthStream
+
+        ds = DepthStream(self.depth_device.currentText().strip())
+        try:
+            ds.open()
+        except DepthError as e:
+            self.cam_status.setText(self.cam_status.text() + f"\n{e}")
+            return
+        ds.start()
+        self.depth_stream = ds
+        self.cam_status.setText(
+            self.cam_status.text() + f"\nProfondeur : {ds.device} ({ds.width}×{ds.height})"
+        )
+
+    def _stop_depth(self):
+        if self.depth_stream is not None:
+            self.depth_stream.stop()
+            self.depth_stream = None
 
     def _cam_fail(self, msg):
         self.btn_cam.blockSignals(True)
@@ -616,17 +831,80 @@ class MainWindow(QMainWindow):
         s = self.cam_stream
         if s is None:
             return
-        if s.error:
-            err = s.error
-            self.btn_cam.setChecked(False)  # déclenche toggle_camera(False)
-            self.cam_status.setText(f"Caméra : {err}")
+        try:
+            if s.error:
+                err = s.error
+                self.btn_cam.setChecked(False)  # déclenche toggle_camera(False)
+                self.cam_status.setText(f"Caméra : {err}")
+                return
+            latest = s.latest()
+            if latest is None:
+                return
+            self._adapt_display_rate()
+            _, rgb, tip = latest
+            shown = self._masked_view(rgb) if self.chk_mask.isChecked() else rgb
+            if self._cam_scale > 1:
+                import cv2
+
+                h, w = shown.shape[:2]
+                small = cv2.resize(
+                    shown,
+                    (w // self._cam_scale, h // self._cam_scale),
+                    interpolation=cv2.INTER_AREA,
+                )
+                self.scan_view.set_frame(small, full_wh=(w, h))
+            else:
+                self.scan_view.set_frame(shown)
+            self.scan_view.set_tip(tip)
+            self.update_normal(rgb, tip)
+        finally:  # réarme quoi qu'il arrive tant que la caméra tourne (timer mono-coup)
+            if self.cam_stream is not None:
+                self.cam_timer.start()
+
+    def _adapt_display_rate(self):
+        """Réduit l'image affichée quand la boucle d'événements prend du retard.
+
+        La période réelle entre ticks, comparée à l'intervalle demandé, mesure la
+        congestion de l'affichage (X11 déporté via SSH : ~1,2 Mo par trame pleine
+        résolution). Le suivi de la bague n'est pas affecté : il tourne en pleine
+        résolution dans le thread caméra.
+        """
+        now = time.monotonic()
+        if self._cam_tick is not None:
+            self._cam_period = 0.8 * self._cam_period + 0.2 * (now - self._cam_tick)
+        self._cam_tick = now
+        scale, self._cam_hold = _display_decimation(
+            self._cam_scale, self._cam_hold, self._cam_period, self.cam_timer.interval() / 1000.0
+        )
+        if scale != self._cam_scale:
+            self._cam_scale = scale
+            if scale > 1:
+                self.cam_status.setText(
+                    f"Caméra : affichage réduit (1/{scale}) — liaison lente (X11 distant ?)"
+                )
+            else:
+                self.cam_status.setText("Caméra : affichage pleine résolution")
+
+    def update_normal(self, rgb, tip):
+        """Normale locale sous la pointe, au rythme de l'affichage (ajustement rapide)."""
+        ds = self.depth_stream
+        if ds is None:
             return
-        latest = s.latest()
-        if latest is None:
+        if ds.error:
+            self.cam_status.setText(f"Caméra : {ds.error}")
+            self._stop_depth()
+            self.scan_view.set_normal(0.0, 0.0, None)
             return
-        _, rgb, tip = latest
-        self.scan_view.set_frame(rgb)
-        self.scan_view.set_tip(tip)
+        normal = None
+        if tip is not None:
+            latest = ds.latest()
+            if latest is not None:
+                from vna_app.vision.depth import rgb_to_depth_px, surface_normal
+
+                h, w = rgb.shape[:2]
+                du, dv = rgb_to_depth_px(tip.x, tip.y, w, h)
+                normal = surface_normal(latest[1], du, dv)
+        self.scan_view.set_normal(tip.x if tip else 0.0, tip.y if tip else 0.0, normal)
 
     def on_tracker_params(self, *_):
         trk = self.cam_tracker
@@ -637,6 +915,73 @@ class MainWindow(QMainWindow):
         trk.s_min = self.trk_sp["s_min"].value()
         trk.v_min = self.trk_sp["v_min"].value()
         trk.min_area = float(self.trk_sp["min_area"].value())
+        trk.sheath_h_center = float(self.trk_sp["sheath_h_center"].value())
+        trk.sheath_h_width = float(self.trk_sp["sheath_h_width"].value())
+
+    def on_map_cmap(self, *_):
+        self.scan_view.set_cmap(self.map_cmap.currentData())
+        self.update_map_path()  # recolorie le chemin existant avec la nouvelle palette
+
+    # -- mesure HSV par clic (la teinte rendue dépend de l'éclairage : on la MESURE)
+    def _set_pick(self, mode, on):
+        self._pick_mode = mode if on else None
+        other = self.btn_pick_sheath if mode == "ring" else self.btn_pick_ring
+        if on:
+            other.blockSignals(True)
+            other.setChecked(False)
+            other.blockSignals(False)
+            what = "la bague" if mode == "ring" else "la gaine"
+            self.cam_status.setText(f"Clique sur {what} dans l'image…")
+
+    def on_scan_click(self, x, y):
+        mode = self._pick_mode
+        if mode is None:
+            return
+        s = self.cam_stream
+        latest = s.latest() if s is not None else None
+        if latest is None:
+            self.cam_status.setText("Mesure impossible : caméra arrêtée")
+            return
+        import cv2
+
+        rgb = latest[1]
+        h, w = rgb.shape[:2]
+        x0, x1 = max(0, int(x) - 5), min(w, int(x) + 6)
+        y0, y1 = max(0, int(y) - 5), min(h, int(y) + 6)
+        if x0 >= x1 or y0 >= y1:
+            return
+        hsv = cv2.cvtColor(rgb[y0:y1, x0:x1], cv2.COLOR_RGB2HSV).reshape(-1, 3)
+        colored = hsv[hsv[:, 1] >= 40]  # écarte les pixels de fond quasi gris du voisinage
+        sel = colored if len(colored) >= 10 else hsv
+        hm, sm, vm = (int(np.median(sel[:, i])) for i in range(3))
+        if mode == "ring":
+            self.trk_sp["h_center"].setValue(hm)
+            self.trk_sp["s_min"].setValue(max(30, int(sm * 0.6)))
+            self.trk_sp["v_min"].setValue(max(25, int(vm * 0.5)))
+            if self.cam_tracker is not None:  # le suivi démarre ICI, pas sur un
+                self.cam_tracker.seed(x, y)  # objet plus gros de la même teinte
+            self.btn_pick_ring.setChecked(False)
+        else:
+            self.trk_sp["sheath_h_center"].setValue(hm)
+            self.btn_pick_sheath.setChecked(False)
+        self.cam_status.setText(
+            f"Mesuré ({'bague' if mode == 'ring' else 'gaine'}) : H {hm}, S {sm}, V {vm} "
+            f"→ seuils réglés. Vérifier avec « Afficher le masque HSV »."
+        )
+
+    def _masked_view(self, rgb):
+        """Superpose le masque HSV du tracker : magenta = bague, jaune = gaine."""
+        trk = self.cam_tracker
+        if trk is None:
+            return rgb
+        import cv2
+
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        out = rgb.copy()
+        out[trk.band_mask(hsv, trk.h_center, trk.h_width) > 0] = (255, 0, 255)
+        if trk.sheath_h_width > 0:
+            out[trk.band_mask(hsv, trk.sheath_h_center, trk.sheath_h_width) > 0] = (255, 255, 0)
+        return out
 
     def on_cam_controls(self, *_):
         auto = self.chk_cam_auto.isChecked()
@@ -708,7 +1053,21 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".csv"):
             path += ".csv"
         self.scan_map.save_csv(path)
-        self.status.setText(f"Enregistré : {path}")
+        saved = [path]
+        base = path[:-4]
+        s = self.cam_stream
+        latest = s.latest() if s is not None else None
+        if latest is not None:  # image caméra brute (sans annotations)
+            rgb = latest[1]
+            h, w = rgb.shape[:2]
+            buf = rgb.tobytes()  # référence gardée : QImage ne copie pas
+            img = QImage(buf, w, h, 3 * w, QImage.Format_RGB888)
+            if img.save(base + "_image.png"):
+                saved.append(base + "_image.png")
+        if self.scan_view._has_frame:  # vue annotée : chemin, croix, axe, normale
+            if self.scan_view.grab().save(base + "_vue.png"):
+                saved.append(base + "_vue.png")
+        self.status.setText("Enregistré : " + ", ".join(saved))
 
     @staticmethod
     def _pair(a, b):
@@ -1357,6 +1716,69 @@ class MainWindow(QMainWindow):
         self.remember_cal(path)
         self.redisplay()
 
+    # -- références ε* persistantes (évite de recapturer air / court-circuit / eau)
+    def save_refs(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Enregistrer les références ε*", "refs_eps.npz", "NumPy (*.npz)"
+        )
+        if not path:
+            return
+        if not path.endswith(".npz"):
+            path += ".npz"
+        try:
+            self.pipeline.save_refs(path)
+        except CalibrationError as e:
+            QMessageBox.warning(self, "Références ε*", str(e))
+            return
+        self.remember_refs(path)
+        self.status.setText(f"Références ε* enregistrées : {path}")
+
+    def load_refs(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Charger des références ε*", "", "NumPy (*.npz)"
+        )
+        if not path:
+            return
+        try:
+            names = self.pipeline.load_refs(path)
+        except CalibrationError as e:
+            QMessageBox.warning(self, "Références ε*", str(e))
+            return
+        self._sync_ref_liquid()
+        self.update_captured_labels()
+        self.remember_refs(path)
+        self.status.setText(f"Références ε* chargées ({', '.join(names)}) : {path}")
+        self.redisplay()
+
+    def remember_refs(self, path):
+        try:
+            LAST_REFS.parent.mkdir(parents=True, exist_ok=True)
+            LAST_REFS.write_text(str(path))
+        except OSError:
+            pass
+
+    def load_last_refs(self):
+        """Recharge au démarrage les dernières références ε* enregistrées/chargées."""
+        try:
+            path = LAST_REFS.read_text().strip()
+            if not path or not Path(path).is_file():
+                return False
+            names = self.pipeline.load_refs(path)
+        except (OSError, CalibrationError):
+            return False
+        self._sync_ref_liquid()
+        self.update_captured_labels()
+        when = time.strftime("%d/%m %H:%M", time.localtime(Path(path).stat().st_mtime))
+        self.status.setText(f"Références ε* rechargées ({', '.join(names)}, {when}) : {path}")
+        return True
+
+    def _sync_ref_liquid(self):
+        i = self.ref_liquid.findText(self.pipeline.ref_liquid)
+        if i >= 0:
+            self.ref_liquid.blockSignals(True)
+            self.ref_liquid.setCurrentIndex(i)
+            self.ref_liquid.blockSignals(False)
+
     def _set_chk(self, on):
         self.chk_cal.blockSignals(True)
         self.chk_cal.setChecked(on)
@@ -1438,7 +1860,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, ev):
         self.hide()  # la fenêtre disparaît tout de suite, l'arrêt du sweep en cours se fait après
+        self._carto_save()
         self.cam_timer.stop()
+        self._stop_depth()
         if self.cam_stream is not None:
             self.cam_stream.stop()
             self.cam_stream = None

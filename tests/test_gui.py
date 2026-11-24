@@ -4,6 +4,7 @@ import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["VNA_APP_NO_SETTINGS"] = "1"  # pas de QSettings réels pendant les tests
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
@@ -44,6 +45,7 @@ def one(v):
 def win(monkeypatch, tmp_path):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(mw, "LAST_CAL", tmp_path / "last_cal")
+    monkeypatch.setattr(mw, "LAST_REFS", tmp_path / "last_refs")
     w = MainWindow("/dev/inexistant")
     # pas de matériel : on neutralise l'envoi de commandes au worker
     monkeypatch.setattr(w, "start", lambda continuous: None)
@@ -534,3 +536,237 @@ def test_map_tab_switch_export_and_clear(win, tmp_path, monkeypatch):
     np.testing.assert_allclose(d, [1.0, 1.0, 2.0, 3.0, 4.0])
     win.clear_map()
     assert len(win.scan_map) == 0
+
+
+def test_map_cmap_switch_recolors_path(win):
+    from vna_app.gui.scanview import CMAPS
+
+    win.scan_map.add(1.0, 10.0, 20.0, 5.0, 1.0)
+    win.scan_map.add(2.0, 30.0, 40.0, 50.0, 2.0)
+    win.update_map_path()
+    win.map_cmap.setCurrentIndex(1)  # Turbo
+    assert win.scan_view.cmap is CMAPS["turbo"]
+    assert len(win.scan_view.path.getData()[0]) == 2  # chemin recoloré, pas perdu
+    win.map_cmap.setCurrentIndex(0)
+    assert win.scan_view.cmap is CMAPS["magenta"]
+
+
+def test_scanview_normal_and_axis_overlays(win):
+    from vna_app.vision.tracker import Tip
+
+    sv = win.scan_view
+    sv.set_tip(Tip(100.0, 80.0, 200.0, ax=1.0, ay=0.0))
+    x, y = sv.axis_line.getData()
+    assert len(x) == 2 and x[0] < 100.0 < x[1]  # segment le long de l'axe, à travers la pointe
+    sv.set_normal(100.0, 80.0, np.array([0.34, 0.0, -0.94]))
+    assert sv.normal_text.isVisible() and "°" in sv.normal_text.textItem.toPlainText()
+    sv.set_normal(0.0, 0.0, None)
+    assert not sv.normal_text.isVisible()
+    sv.set_tip(Tip(100.0, 80.0, 200.0))  # sans gaine : pas d'axe
+    ax_data = sv.axis_line.getData()[0]
+    assert ax_data is None or len(ax_data) == 0
+
+
+class _FakeCam:
+    def __init__(self):
+        self.frame = np.zeros((8, 8, 3), np.uint8)
+
+    def latest(self):
+        return (0.0, self.frame, None)
+
+    def stop(self, timeout=0):
+        pass
+
+
+def test_export_map_saves_csv_and_images(win, tmp_path, monkeypatch):
+    win.scan_map.add(1.0, 1.0, 2.0, 3.0, 4.0)
+    win.cam_stream = _FakeCam()
+    win.scan_view.set_frame(win.cam_stream.frame)
+    out = tmp_path / "carto.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    win.export_map()
+    assert out.exists()
+    assert (tmp_path / "carto_image.png").exists()  # image caméra brute
+    assert (tmp_path / "carto_vue.png").exists()  # vue annotée
+    win.cam_stream = None
+
+
+def test_refs_save_and_load_buttons(win, tmp_path, monkeypatch):
+    for name, g in (("air", 0.9), ("probe_short", -0.9), ("ref", 0.2)):
+        win.pending = name
+        feed(win, one(g))
+    out = tmp_path / "refs.npz"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    win.save_refs()
+    assert out.exists()
+    win.pipeline.standards.clear()
+    win.update_captured_labels()
+    assert "Air" not in win.eps_captured.text()
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(out), ""))
+    win.load_refs()
+    assert "Air" in win.eps_captured.text()
+    assert "Court-circuit" in win.eps_captured.text()
+
+
+def test_refs_reloaded_at_startup(win, tmp_path, monkeypatch):
+    for name, g in (("air", 0.9), ("probe_short", -0.9), ("ref", 0.2)):
+        win.pending = name
+        feed(win, one(g))
+    out = tmp_path / "refs.npz"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    win.save_refs()
+    w2 = MainWindow("/dev/inexistant")  # LAST_REFS pointe sur refs.npz : rechargées
+    try:
+        assert "air" in w2.pipeline.standards and "ref" in w2.pipeline.standards
+        assert "Air" in w2.eps_captured.text()
+    finally:
+        w2.close()
+
+
+def _frame_with_patch(h_val=84, s_val=200, v_val=220):
+    """Trame RGB 64×64 avec un carré coloré HSV donné autour de (32, 32)."""
+    import cv2
+
+    hsv = np.zeros((64, 64, 3), np.uint8)
+    hsv[:, :, 2] = 30  # fond sombre quasi gris
+    hsv[24:40, 24:40] = (h_val, s_val, v_val)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+
+
+class _FakeCamFrame:
+    def __init__(self, rgb):
+        self.rgb = rgb
+
+    def latest(self):
+        return (0.0, self.rgb, None)
+
+    def stop(self, timeout=0):
+        pass
+
+
+def test_pick_ring_measures_hsv(win):
+    pytest.importorskip("cv2")
+    win.cam_stream = _FakeCamFrame(_frame_with_patch(h_val=110, s_val=180, v_val=200))
+    win.btn_pick_ring.setChecked(True)
+    assert win._pick_mode == "ring"
+    win.on_scan_click(32.0, 32.0)
+    assert abs(win.trk_sp["h_center"].value() - 110) <= 2
+    assert win.trk_sp["s_min"].value() == int(180 * 0.6)
+    assert win.trk_sp["v_min"].value() == int(200 * 0.5)
+    assert not win.btn_pick_ring.isChecked()  # mesure faite : mode quitté
+    assert "Mesuré" in win.cam_status.text()
+    win.cam_stream = None
+
+
+def test_pick_sheath_sets_center_only(win):
+    pytest.importorskip("cv2")
+    win.cam_stream = _FakeCamFrame(_frame_with_patch(h_val=120, s_val=255, v_val=230))
+    s_before = win.trk_sp["s_min"].value()
+    win.btn_pick_sheath.setChecked(True)
+    win.on_scan_click(32.0, 32.0)
+    assert abs(win.trk_sp["sheath_h_center"].value() - 120) <= 2
+    assert win.trk_sp["s_min"].value() == s_before  # seuils bague inchangés
+    win.cam_stream = None
+
+
+def test_pick_buttons_mutually_exclusive(win):
+    win.btn_pick_ring.setChecked(True)
+    win.btn_pick_sheath.setChecked(True)
+    assert not win.btn_pick_ring.isChecked()
+    assert win._pick_mode == "sheath"
+
+
+def test_masked_view_tints_matches(win):
+    pytest.importorskip("cv2")
+    from vna_app.vision.tracker import RingTracker
+
+    win.cam_tracker = RingTracker()
+    rgb = _frame_with_patch(h_val=win.trk_sp["h_center"].value())
+    out = win._masked_view(rgb)
+    assert (out[32, 32] == (255, 0, 255)).all()  # pixels bague teintés magenta
+    assert (out[5, 5] == rgb[5, 5]).all()  # fond inchangé
+    win.cam_tracker = None
+    assert win._masked_view(rgb) is rgb  # sans tracker : image brute
+
+
+def test_carto_settings_roundtrip(win, tmp_path):
+    from PyQt5.QtCore import QSettings
+
+    win.trk_sp["h_center"].setValue(123)
+    win.cam_expo.setValue(42)
+    win.map_contact.setValue(7.5)
+    win.map_cmap.setCurrentIndex(1)  # turbo
+    win.chk_depth.setChecked(False)
+    s = QSettings(str(tmp_path / "carto.ini"), QSettings.IniFormat)
+    win._carto_save(s)
+    s.sync()
+
+    # valeurs écrasées puis restaurées
+    win.trk_sp["h_center"].setValue(10)
+    win.cam_expo.setValue(100)
+    win.map_contact.setValue(1.0)
+    win.map_cmap.setCurrentIndex(0)
+    win.chk_depth.setChecked(True)
+    win._carto_restore(QSettings(str(tmp_path / "carto.ini"), QSettings.IniFormat))
+    assert win.trk_sp["h_center"].value() == 123
+    assert win.cam_expo.value() == 42
+    assert win.map_contact.value() == 7.5
+    assert win.map_cmap.currentData() == "turbo"
+    assert not win.chk_depth.isChecked()
+
+
+# -- affichage caméra adaptatif (X11 déporté via SSH) -------------------------------------
+
+
+class _FakeCamPoll:
+    error = ""
+
+    def __init__(self):
+        self.frame = np.zeros((480, 848, 3), np.uint8)
+
+    def latest(self):
+        return (0.0, self.frame, None)
+
+    def stop(self, timeout=0):
+        pass
+
+
+def test_poll_camera_rearms_single_shot_timer(win):
+    """Timer mono-coup réarmé en fin de poll : la file d'événements ne s'accumule pas."""
+    assert win.cam_timer.isSingleShot()
+    win.cam_stream = _FakeCamPoll()
+    win.poll_camera()
+    assert win.cam_timer.isActive()
+    win.cam_stream = None
+    win.cam_timer.stop()
+
+
+def test_display_decimation_policy():
+    from vna_app.gui.main_window import _display_decimation
+
+    assert _display_decimation(1, 0, 0.30, 0.066) == (2, 30)  # congestion : dégrade
+    assert _display_decimation(2, 0, 0.30, 0.066) == (4, 30)
+    assert _display_decimation(4, 0, 9.90, 0.066) == (4, 0)  # plafond 1/4
+    assert _display_decimation(2, 5, 0.30, 0.066) == (2, 4)  # hold : pas de réévaluation
+    assert _display_decimation(2, 0, 0.066, 0.066) == (1, 150)  # ça respire : remonte
+    assert _display_decimation(1, 0, 0.066, 0.066) == (1, 0)  # plancher
+    assert _display_decimation(2, 0, 0.10, 0.066) == (2, 0)  # hystérésis : stable
+
+
+def test_poll_camera_downscale_keeps_full_res_coords(win):
+    """Image affichée réduite mais repère pleine résolution : overlays et clics intacts."""
+    import pytest as _pytest
+
+    win.cam_stream = _FakeCamPoll()
+    win._cam_scale, win._cam_hold = 2, 10**6  # décimation figée pour le test
+    win.poll_camera()
+    img = win.scan_view.img
+    assert img.image.shape[:2] == (240, 424)  # moitié des pixels envoyés à l'affichage
+    assert img.transform().m11() == _pytest.approx(2.0)  # étirés sur le repère 848×480
+    assert img.transform().m22() == _pytest.approx(2.0)
+    win._cam_scale = 1
+    win.poll_camera()
+    assert img.image.shape[:2] == (480, 848)
+    assert img.transform().m11() == _pytest.approx(1.0)
+    win.cam_stream = None
+    win.cam_timer.stop()
